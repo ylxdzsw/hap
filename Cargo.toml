@@ -1,0 +1,12 @@
+[package]
+name = "spmd"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oh-my-rust = { git = "https://github.com/ylxdzsw/oh-my-rust" }
+cpython = { version = "0.6", features = ["extension-module"] }
+smallvec = { version = "1", features = ["union", "const_generics", "specialization", "may_dangle"] }
