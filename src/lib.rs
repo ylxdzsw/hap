@@ -9,10 +9,12 @@ use oh_my_rust::*;
 use cpython::{PyResult, PyTuple, ToPyObject, PythonObject, ObjectProtocol, Python, PyList, PyObject, PyDict};
 use smallvec::{SmallVec, smallvec};
 
-type SVec<T, const N: usize = 3> = SmallVec<[T; N]>;
+use crate::graph::{Tensor, Node, TensorIndex, Signature, Form, Graph, NodeIndex};
 
 mod graph;
 mod dp;
+
+pub type SVec<T, const N: usize = 3> = SmallVec<[T; N]>;
 
 cpython::py_module_initializer!(spmd, |py, m| {
     #[allow(clippy::manual_strip)]
@@ -29,7 +31,7 @@ cpython::py_module_initializer!(spmd, |py, m| {
     Ok(())
 });
 
-fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict) -> PyResult<graph::Graph> {
+fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict) -> PyResult<Graph> {
     macro_rules! py_meta {
         ($py_node: expr, $meta_name: expr) => { py_meta!($py_node, $meta_name, _) };
         ($py_node: expr, $meta_name: expr, $out_type: ty) => {{
@@ -44,15 +46,15 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
 
     let n = py_nodes.len(py);
 
-    let mut tensors: Vec<graph::Tensor> = vec![];
-    let mut nodes: Vec<Option<graph::Node>> = Vec::with_capacity(n);
+    let mut tensors: Vec<Tensor> = vec![];
+    let mut nodes: Vec<Option<Node>> = Vec::with_capacity(n);
 
-    let mut tensor_map: BTreeMap<usize, graph::TensorIndex> = Default::default(); // node_id to tensor. This is used for adaptive nodes whose entry in the nodes list is None
+    let mut tensor_map: BTreeMap<usize, TensorIndex> = Default::default(); // node_id to tensor. This is used for adaptive nodes whose entry in the nodes list is None
 
     for (id, py_node) in py_nodes.iter(py).enumerate() {
         debug_assert_eq!(id, py_meta!(py_node, "id").unwrap());
 
-        let mut node = graph::Node {
+        let mut node = Node {
             origin_id: id,
             op_kind: py_node.getattr(py, "op")?.extract::<Cow<str>>(py)?.parse().unwrap(),
             inputs: Default::default(),
@@ -72,8 +74,8 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
             for s in py_shape.iter(py) {
                 size *= s.extract::<usize>(py)?
             }
-            let tensor_index = tensors.len();
-            let mut tensor = graph::Tensor { size, ..Default::default() };
+            let tensor_index = TensorIndex(tensors.len());
+            let mut tensor = Tensor { size, ..Default::default() };
             tensors.push(tensor);
             node.outputs.push(tensor_index);
         }
@@ -106,28 +108,28 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
 
         match &*py_node.getattr(py, "op")?.extract::<Cow<str>>(py)? {
             "output" => { // the output node only has a Reduce signature
-                let reduce_signature = graph::Signature {
-                    input_forms: smallvec![graph::Form::Reduce],
+                let reduce_signature = Signature {
+                    input_forms: smallvec![Form::Reduce],
                     ..Default::default()
                 };
                 node.signatures.push(reduce_signature);
             }
             "placeholder" => { // the placeholder only has a Full signature. We assume that each worker load the full batch then performing dynamic slicing
-                let full_signature = graph::Signature {
-                    output_forms: smallvec![graph::Form::Full],
+                let full_signature = Signature {
+                    output_forms: smallvec![Form::Full],
                     ..Default::default()
                 };
                 node.signatures.push(full_signature);
             }
             "get_attr" => {
-                let replication_signature = graph::Signature { // this is the parameters analog of full signature
-                    output_forms: smallvec![graph::Form::Replicate],
+                let replication_signature = Signature { // this is the parameters analog of full signature
+                    output_forms: smallvec![Form::Replicate],
                     ..Default::default()
                 };
                 node.signatures.push(replication_signature);
                 for dim in 0..py_meta!(py_node, "output_shape", PyTuple).expect("no output shape in get_attr node").len(py) {
-                    let gather_signature = graph::Signature {
-                        output_forms: smallvec![graph::Form::Gather(dim as _)],
+                    let gather_signature = Signature {
+                        output_forms: smallvec![Form::Gather(dim as _)],
                         ..Default::default()
                     };
                     node.signatures.push(gather_signature)
@@ -136,9 +138,9 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
             "call_function" | "call_method" => {
                 // let flops = py_meta!(py_node, "flops").unwrap_or_default();
 
-                let full_signature = graph::Signature {
-                    input_forms: node.inputs.iter().map(|_| graph::Form::Full).collect(),
-                    output_forms: node.outputs.iter().map(|_| graph::Form::Full).collect(),
+                let full_signature = Signature {
+                    input_forms: node.inputs.iter().map(|_| Form::Full).collect(),
+                    output_forms: node.outputs.iter().map(|_| Form::Full).collect(),
                     cost: 0., //comp_profiler.get_time(flops, None),
                 };
                 node.signatures.push(full_signature);
@@ -148,12 +150,12 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
                 for py_signature in py_signatures.iter(py) {
                     let output_forms = if let Some(true) = py_meta!(py_node, "output_is_tuple") {
                         let out_forms: PyTuple = py_signature.get_item(py, 1usize)?.cast_into(py)?;
-                        out_forms.iter(py).map(|out_form| out_form.extract(py).map(|x: Cow<str>| x.parse::<graph::Form>().unwrap())).collect::<PyResult<_>>()?
+                        out_forms.iter(py).map(|out_form| out_form.extract(py).map(|x: Cow<str>| x.parse::<Form>().unwrap())).collect::<PyResult<_>>()?
                     } else {
                         smallvec![py_signature.get_item(py, 1usize)?.extract::<Cow<str>>(py)?.parse().unwrap()]
                     };
 
-                    let mut input_forms = smallvec![Default::default(); node.inputs.len()];
+                    let mut input_forms: SVec<Option<Form>> = smallvec![None; node.inputs.len()];
                     let arg_form_dict: PyDict = py_signature.get_item(py, 0usize)?.cast_into(py)?;
                     for (arg_name, arg_form) in arg_form_dict.items(py) {
                         let py_arg_node = arg_dict.as_object().get_item(py, arg_name)?;
@@ -165,13 +167,14 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
                                 &tensor_map[&arg_tensor_id]
                             };
                             let i = node.inputs.iter().position(|x| x == arg_tensor).expect("input node not in inputs");
-                            input_forms[i] = arg_form.extract::<Cow<str>>(py)?.parse().unwrap();
+                            input_forms[i] = Some(arg_form.extract::<Cow<str>>(py)?.parse().unwrap());
                         }
                     }
 
                     let cost = 0.0; // comp_profiler.get_time(flops, &input_forms);
-                    node.signatures.push(graph::Signature {
-                        input_forms, output_forms, cost,
+                    node.signatures.push(Signature {
+                        input_forms: input_forms.into_iter().collect::<Option<SVec<_>>>().unwrap(),
+                        output_forms, cost,
                     })
                 }
             }
@@ -182,7 +185,7 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
             let pyname = py_node.getattr(py, "name")?;
             let name: Cow<str> = pyname.extract(py)?;
             if let Some(forms) = hints.get_item(py, &name) {
-                let forms: Vec<graph::Form> = forms.extract::<PyList>(py)?.iter(py).map(|x| x.extract(py).map(|x: Cow<str>| x.parse::<graph::Form>().unwrap())).collect::<PyResult<_>>()?;
+                let forms: Vec<Form> = forms.extract::<PyList>(py)?.iter(py).map(|x| x.extract(py).map(|x: Cow<str>| x.parse::<Form>().unwrap())).collect::<PyResult<_>>()?;
                 if node.outputs.len() != 1 {
                     warn!("hints for {} ignored because the node has multiple outputs", name);
                     break 'process_hints
@@ -200,30 +203,32 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
     let nodes: Vec<_> = nodes.into_iter().flatten().collect();
 
     for (node_index, node) in nodes.iter().enumerate() {
+        let node_index = NodeIndex(node_index);
+
         for &output in node.outputs.iter() {
-            tensors[output].producer = node_index;
+            tensors[output.0].producer = node_index;
         }
 
         for &input in node.inputs.iter() {
-            tensors[input].consumers.push(node_index);
+            tensors[input.0].consumers.push(node_index);
         }
 
         for signature in node.signatures.iter() {
             for (&input_index, &input_form) in node.inputs.iter().zip(signature.input_forms.iter()) {
-                let mut input_tensor = &mut tensors[input_index];
-                if !input_tensor.forms.contains(&input_form) {
-                    input_tensor.forms.push(input_form)
+                let mut input_tensor = &mut tensors[input_index.0];
+                if !input_tensor.consumer_forms.contains(&input_form) {
+                    input_tensor.consumer_forms.push(input_form)
                 }
             }
 
             for (&output_index, &output_form) in node.outputs.iter().zip(signature.output_forms.iter()) {
-                let mut output_tensor = &mut tensors[output_index];
-                if !output_tensor.forms.contains(&output_form) {
-                    output_tensor.forms.push(output_form)
+                let mut output_tensor = &mut tensors[output_index.0];
+                if !output_tensor.producer_forms.contains(&output_form) {
+                    output_tensor.producer_forms.push(output_form)
                 }
             }
         }
     }
 
-    Ok(graph::Graph { nodes, tensors })
+    Ok(Graph { nodes, tensors })
 }

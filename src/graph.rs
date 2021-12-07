@@ -16,7 +16,8 @@ pub struct Tensor {
     pub size: usize,
     pub producer: NodeIndex,
     pub consumers: SVec<NodeIndex>,
-    pub forms: Vec<Form> // all possible forms. Form::Undecided is not listed
+    pub producer_forms: Vec<Form>, // all possible forms that could be produced
+    pub consumer_forms: Vec<Form>, // all possible forms that could be consumed
 }
 
 #[derive(Clone, Default, Debug)]
@@ -26,11 +27,7 @@ pub struct Graph {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Form { Full, Gather(u8), Reduce, Replicate, Undecided }
-
-impl Default for Form {
-    fn default() -> Form { Form::Undecided }
-}
+pub enum Form { Full, Gather(u8), Reduce, Replicate }
 
 impl FromStr for Form {
     type Err = ();
@@ -86,6 +83,14 @@ pub struct Signature {
     pub cost: f64,
 }
 
-pub type NodeIndex = usize;
-pub type TensorIndex = usize;
-pub type SignatureIndex = usize;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct NodeIndex(pub usize);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct TensorIndex(pub usize);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct SignatureIndex(pub usize);
