@@ -42,10 +42,50 @@ class SwitchTransformerEncoderLayer(nn.Module):
         x = self.norm1(x + self._sa_block(x))
         x = self.norm2(x + self.moe(x))
         return x
-    
+
     def _sa_block(self, x):
         x = self.self_atten(x, x, x, need_weights=False)[0]
         return self.dropout(x)
+
+class NaiveSwitchTransformerEncoderLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.self_atten = torch.nn.MultiheadAttention(1024, 4, dropout=0.1)
+
+        self.moe = fmoe.FMoE(
+            num_expert=8, # this is the number of experts on *each* worker
+            d_model=1024,
+            top_k=1,
+            world_size=world_size,
+
+            expert=lambda d: torch.nn.Sequential(
+                LogShape(),
+                torch.nn.Linear(d, 4096),
+                torch.nn.ReLU(),
+                torch.nn.Linear(4096, d),
+            ),
+        )
+
+        self.norm1 = torch.nn.LayerNorm(1024, eps=1e-5)
+        self.norm2 = torch.nn.LayerNorm(1024, eps=1e-5)
+        self.dropout = torch.nn.Dropout(0.1)
+
+    def forward(self, x):
+        x = self.norm1(x + self._sa_block(x))
+        x = self.norm2(x + self.moe(x))
+        return x
+
+    def _sa_block(self, x):
+        x = self.self_atten(x, x, x, need_weights=False)[0]
+        return self.dropout(x)
+
+class LogShape(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+    def forward(self, x):
+        print(x.shape)
+        return x
 
 class MoE(torch.nn.Module):
     def __init__(self) -> None:
@@ -54,7 +94,8 @@ class MoE(torch.nn.Module):
         self.layers = torch.nn.ModuleList([
             torch.nn.TransformerEncoderLayer(1024, 4, 4096, 0.1)
             if i % 2 == 0 else
-            SwitchTransformerEncoderLayer()
+            # SwitchTransformerEncoderLayer()
+            NaiveSwitchTransformerEncoderLayer()
             for i in range(4)
         ])
 

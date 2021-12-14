@@ -31,7 +31,10 @@ class SwitchTransformerEncoderLayer(nn.Module):
 
         self.moe = deepspeed.moe.layer.MoE(
             hidden_size=1024,
-            expert=torch.nn.Linear(1024, 1024),
+            expert=torch.nn.Sequential(
+                torch.nn.Linear(1024, 4096),
+                torch.nn.Linear(4096, 1024),
+            ),
             num_experts=8,
             k=1,
             min_capacity=10,
@@ -45,7 +48,7 @@ class SwitchTransformerEncoderLayer(nn.Module):
         x = self.norm1(x + self._sa_block(x))
         x = self.norm2(x + self.moe(x)[0])
         return x
-    
+
     def _sa_block(self, x):
         x = self.self_atten(x, x, x, need_weights=False)[0]
         return self.dropout(x)
