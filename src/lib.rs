@@ -25,6 +25,7 @@ cpython::py_module_initializer!(spmd, |py, m| {
     #[allow(clippy::manual_strip)]
     m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyObject, hints: PyDict) -> PyResult<PyTuple> {
         let graph = build_graph(py, py_nodes, &profiler, hints)?;
+        dp::dp2(&graph);
         Ok((2, ).to_py_object(py))
     }))?;
 
