@@ -12,6 +12,12 @@ pub struct Computation {
     signature: SignatureIndex
 }
 
+impl Computation {
+    fn cost(&self, g: Graph) -> f64 {
+        g[self.node].signatures[self.signature.0].cost
+    }
+}
+
 #[derive(Clone)]
 pub struct Communication {
     tensor: TensorIndex,
@@ -19,27 +25,52 @@ pub struct Communication {
     new_form: Form
 }
 
+impl Communication {
+    fn cost(&self, g: Graph) -> f64 {
+        // g[self.tensor].size
+        todo!()
+    }
+}
+
+/// invariant: comp_a and comp_b cannot both be non-empty. The same applies for comm_a and comm_b
 #[derive(Clone, Default)]
 pub struct Stage {
-    computation_on_first_duplica: bool,
+    computations_a: SVec<Computation, PROGRESS_LIMIT>,
+    computations_b: SVec<Computation, PROGRESS_LIMIT>,
 
-    computations: SVec<Computation, PROGRESS_LIMIT>,
-    communications: SVec<Communication>,
+    communications_a: SVec<Communication>,
+    communications_b: SVec<Communication>,
 
-    acc_cost: f64, // accumulate cost
+    acc_cost: f64, // accumulate cost = prev.acc_cost + max(self.comp, self.comm)
     prev: Option<Rc<Stage>>
 }
 
+impl Stage {
+    // check if a stage is overlapping (has both computation and communication). Non-overlapping statges can only be followed by an overlapping statge.
+    // empty statges (has neither computation and communication) is treated as overlapping to allow the first stage to be non-overlapping
+    fn is_overlapping(&self) -> bool {
+        self.has_computation() ^ self.has_communication()
+    }
+
+    fn has_computation(&self) -> bool {
+        !self.computations_a.is_empty() || !self.computations_b.is_empty()
+    }
+
+    fn has_communication(&self) -> bool {
+        !self.communications_a.is_empty() || !self.communications_b.is_empty()
+    }
+}
+
 struct DuplicaCut { // the cut on a single duplica
-    next: NodeIndex,
+    next_node: NodeIndex,
     state_tensors: Vec<TensorIndex>, // sorted
     state_tensors_reverse_map: BTreeMap<TensorIndex, usize>, // map a tensor to its index in the state_tensors
 }
 
 impl DuplicaCut {
-    fn new(next: NodeIndex, state_tensors: Vec<TensorIndex>) -> DuplicaCut {
+    fn new(next_node: NodeIndex, state_tensors: Vec<TensorIndex>) -> DuplicaCut {
         let reverse_map = state_tensors.iter().enumerate().map(|(i, &tensor_index)| (tensor_index, i)).collect();
-        DuplicaCut { next, state_tensors, state_tensors_reverse_map: reverse_map }
+        DuplicaCut { next_node, state_tensors, state_tensors_reverse_map: reverse_map }
     }
 
     fn get_all_in_graph(graph: &Graph) -> Vec<DuplicaCut> {
@@ -53,6 +84,8 @@ impl DuplicaCut {
                 state_tensors[i].push(TensorIndex(tensor_id))
             }
         }
+
+        state_tensors.push(vec![]); // a trailing cut that cuts after the last node
 
         state_tensors.into_iter().enumerate().map(|(i, x)| {
             DuplicaCut::new(NodeIndex(i), x)
@@ -88,11 +121,11 @@ impl DuplicaState {
 
     fn get_next_computations(&self, g: &Graph) -> SVec<(DuplicaState, Computation)> {
         self.next_computations.borrow_mut().get_or_insert_with(|| {
-            if g.len() <= g[self.cut].next.0 {
+            if g.n_nodes() <= g[self.cut].next_node.0 {
                 return smallvec![]
             }
 
-            let next_node = &g[g[self.cut].next];
+            let next_node = &g[g[self.cut].next_node];
             let mut result = smallvec![];
 
             for (signature_id, signature) in next_node.signatures.iter().enumerate() {
@@ -112,7 +145,7 @@ impl DuplicaState {
                     let i = next_cut.state_tensors_reverse_map[output_tensor_index];
                     next_state.available_forms[i].insert(output_tensor_form);
                 }
-                let computation = Computation { node: g[self.cut].next, signature: SignatureIndex(signature_id) };
+                let computation = Computation { node: g[self.cut].next_node, signature: SignatureIndex(signature_id) };
                 result.push((next_state, computation))
             }
 
@@ -263,24 +296,28 @@ impl<'g> Graph<'g> {
         result
     }
 
-    fn len(&self) -> usize {
+    fn n_nodes(&self) -> usize {
         self.nodes.len()
+    }
+
+    fn n_cuts(&self) -> usize {
+        self.cuts.len()
     }
 }
 
 // dp for duplexed graph
 pub fn dp2(graph: &crate::graph::Graph) {
     let g = Graph::new(graph);
-    let n = g.len();
+    let n_cut = g.n_cuts();
 
     let mut pareto: Vec<Vec<Vec<State>>> = // the (i, j)-th element is a list of states and corresponding best stage when the first duplica is on cut i and the second is on cut j
-        (0..n).map(|_| (0..n).map(|_| vec![]).collect()).collect();
+        (0..n_cut).map(|_| (0..n_cut).map(|_| vec![]).collect()).collect();
 
     let initial_state = State::empty(&g);
     pareto[0][0].push(initial_state);
 
     #[allow(clippy::needless_range_loop)]
-    for cut_index_a in 0..n {
+    for cut_index_a in 0..n_cut {
         for cut_index_b in cut_index_a.saturating_sub(PROGRESS_LIMIT)..cut_index_a {
             for state in pareto[cut_index_a][cut_index_b].iter() {
 
@@ -290,80 +327,94 @@ pub fn dp2(graph: &crate::graph::Graph) {
     }
 }
 
+#[allow(clippy::redundant_clone)]
 fn explore_next_stage(g: &Graph, pareto: &mut Vec<Vec<Vec<State>>>, state: State) {
     let State(a, b, prev_stage) = state;
 
-    // 1. computation on a, possibly communication on b
+    // 1. computation on a, communication on b
     for (new_a, computations) in a.get_possible_computations(g) {
         if b.progress() + PROGRESS_LIMIT < new_a.progress() { // exceed progress limit
             continue
         }
         for (new_b, communications) in b.get_possible_communications(g) {
             let stage = Rc::new(Stage {
-                computation_on_first_duplica: true,
-                computations: computations.clone(),
-                communications,
+                computations_a: computations.clone(),
+                computations_b: smallvec![],
+                communications_a: smallvec![],
+                communications_b: communications.clone(),
                 acc_cost: prev_stage.acc_cost,
                 prev: Some(prev_stage.clone()),
             });
             let new_state = State(new_a.clone(), new_b, stage.clone());
-            append_path(g, pareto, new_state, stage);
+            update_pareto(g, pareto, new_state, stage);
         }
-
-        // computation only stage. Requires previous stage not computation-only on the same micro. Alternative computation-only on two microes is OK as required by PROGRESS_LIMIT
-        if prev_stage.computation_on_first_duplica && prev_stage.communications.is_empty() {
-            continue
-        }
-        let stage = Rc::new(Stage {
-            computation_on_first_duplica: true,
-            computations,
-            communications: smallvec![],
-            acc_cost: prev_stage.acc_cost,
-            prev: Some(prev_stage.clone()),
-        });
-        let new_state = State(new_a, b.clone(), stage.clone());
-        append_path(g, pareto, new_state, stage);
     }
 
-    // 2. computation on b, possibly communication on a
+    // 2. computation on b, communication on a
     for (new_b, computations) in b.get_possible_computations(g) {
         if new_b.progress() > a.progress() { // b is more advanced
             continue
         }
         for (new_a, communications) in a.get_possible_communications(g) {
             let stage = Rc::new(Stage {
-                computation_on_first_duplica: false,
-                computations: computations.clone(),
-                communications,
+                computations_a: smallvec![],
+                computations_b: computations.clone(),
+                communications_a: communications.clone(),
+                communications_b: smallvec![],
                 acc_cost: prev_stage.acc_cost,
                 prev: Some(prev_stage.clone()),
             });
             let new_state = State(new_a, new_b.clone(), stage.clone());
-            append_path(g, pareto, new_state, stage);
+            update_pareto(g, pareto, new_state, stage);
         }
-
-        if !prev_stage.computation_on_first_duplica && prev_stage.communications.is_empty() {
-            continue
-        }
-        let stage = Rc::new(Stage {
-            computation_on_first_duplica: false,
-            computations,
-            communications: smallvec![],
-            acc_cost: prev_stage.acc_cost,
-            prev: Some(prev_stage.clone()),
-        });
-        let new_state = State(a.clone(), new_b, stage.clone());
-        append_path(g, pareto, new_state, stage);
     }
 
     // 3. Assuming this function is called in the order of costs in a single cell, such that states can updates other states in the same progress (because only small cost states may update large cost state by appending a communication-only stage that must increase the cost)
-
-    // TODO: if the last stage only contains computation, the current one cannot be a computation-only stage on the same duplica, unless the last stage is on the limit. The same applies to communication-only stages
+    if !prev_stage.is_overlapping() {
+        return
+    }
+    for (new_a, communications_a) in a.get_possible_communications(g).into_iter().chain([(a.clone(), smallvec![])]) {
+        for (new_b, communications_b) in b.get_possible_communications(g).into_iter().chain([(b.clone(), smallvec![])]) {
+            if communications_a.is_empty() && communications_b.is_empty() {
+                continue
+            }
+            let stage = Rc::new(Stage {
+                computations_a: smallvec![],
+                computations_b: smallvec![],
+                communications_a: communications_a.clone(),
+                communications_b: communications_b.clone(),
+                acc_cost: prev_stage.acc_cost,
+                prev: Some(prev_stage.clone()),
+            });
+            let new_state = State(new_a.clone(), new_b, stage.clone());
+            update_pareto(g, pareto, new_state, stage);
+        }
+    }
+    for (new_a, computations_a) in a.get_possible_computations(g).into_iter().chain([(a.clone(), smallvec![])]) {
+        for (new_b, computations_b) in b.get_possible_computations(g).into_iter().chain([(b.clone(), smallvec![])]) {
+            if computations_a.is_empty() && computations_b.is_empty() {
+                continue
+            }
+            if new_b.progress() > new_a.progress() || new_b.progress() + PROGRESS_LIMIT < new_a.progress() {
+                continue
+            }
+            let stage = Rc::new(Stage {
+                computations_a: computations_a.clone(),
+                computations_b: computations_b.clone(),
+                communications_a: smallvec![],
+                communications_b: smallvec![],
+                acc_cost: prev_stage.acc_cost,
+                prev: Some(prev_stage.clone()),
+            });
+            let new_state = State(new_a.clone(), new_b, stage.clone());
+            update_pareto(g, pareto, new_state, stage);
+        }
+    }
 }
 
 // try append a stage that leads to state in the pareto
-fn append_path(g: &Graph, pareto: &mut Vec<Vec<Vec<State>>>, state: State, stage: Rc<Stage>) {
+fn update_pareto(g: &Graph, pareto: &mut Vec<Vec<Vec<State>>>, state: State, stage: Rc<Stage>) {
 
 }
 
-// TODO: needless branches in tensor forms. The possible tensor forms may be less than consumer_forms due to 1. next_communicatable prevent some signatures such that it cannot be used and 2. it has multiple consumers and some has already finished
+// TODO: extra branches explored in tensor forms. The possible tensor forms may be less than consumer_forms due to 1. next_communicatable prevent some signatures such that it cannot be used and 2. it has multiple consumers and some has already finished
