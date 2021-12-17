@@ -233,3 +233,26 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
 
     Ok(Graph { nodes, tensors })
 }
+
+macro_rules! new_index_type {
+    ($visibility: vis, $type_name: ident) => {
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+        #[repr(transparent)]
+        $visibility struct $type_name(pub usize);
+        impl<T: Into<$type_name>> std::ops::Add<T> for $type_name {
+            type Output = $type_name;
+
+            fn add(self, rhs: T) -> $type_name {
+                $type_name(self.0 + rhs.into().0)
+            }
+        }
+
+        impl From<usize> for $type_name {
+            fn from(x: usize) -> $type_name {
+                $type_name(x)
+            }
+        }
+    }
+}
+
+pub(crate) use new_index_type;

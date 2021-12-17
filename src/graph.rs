@@ -83,14 +83,6 @@ pub struct Signature {
     pub cost: f64,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(transparent)]
-pub struct NodeIndex(pub usize);
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(transparent)]
-pub struct TensorIndex(pub usize);
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(transparent)]
-pub struct SignatureIndex(pub usize);
+crate::new_index_type!(pub, NodeIndex);
+crate::new_index_type!(pub, TensorIndex);
+crate::new_index_type!(pub, SignatureIndex);
