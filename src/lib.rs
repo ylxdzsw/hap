@@ -3,7 +3,7 @@
 
 #![allow(unused)]
 
-use std::{collections::BTreeMap, borrow::Cow};
+use std::{collections::BTreeMap, borrow::Cow, sync::atomic::AtomicBool};
 
 use oh_my_rust::*;
 use cpython::{PyResult, PyTuple, ToPyObject, PythonObject, ObjectProtocol, Python, PyList, PyObject, PyDict};
@@ -16,7 +16,16 @@ mod dp;
 
 pub type SVec<T, const N: usize = 3> = SmallVec<[T; N]>;
 
+static CTRLC_TRAPPED: AtomicBool = AtomicBool::new(false);
+static CTRLC_RECEIVED: AtomicBool = AtomicBool::new(false);
+
 cpython::py_module_initializer!(spmd, |py, m| {
+    if !CTRLC_TRAPPED.load(std::sync::atomic::Ordering::Relaxed) {
+        ctrlc::set_handler(|| {
+            CTRLC_RECEIVED.store(true, std::sync::atomic::Ordering::Relaxed)
+        }).unwrap();
+    }
+
     #[allow(clippy::manual_strip)]
     m.add(py, "example", cpython::py_fn!(py, example() -> PyResult<PyTuple> {
         Ok((2, ).to_py_object(py))
@@ -64,21 +73,26 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
         };
 
         // generate output tensors and link them
-        let meta_output_shape = py_meta!(py_node, "output_shape", PyTuple).unwrap();
-        let output_shapes = if let Some(true) = py_meta!(py_node, "output_is_tuple") {
-            meta_output_shape.iter(py).map(|x| x.extract(py)).collect::<PyResult<SVec<_>>>()?
-        } else {
-            smallvec![meta_output_shape]
-        };
-        for py_shape in output_shapes.iter() {
-            let mut size = 4; // 4 bytes per element
-            for s in py_shape.iter(py) {
-                size *= s.extract::<usize>(py)?
+        'gen_output_tensor: {
+            if &*py_node.getattr(py, "op")?.extract::<Cow<str>>(py)? == "output" {
+                break 'gen_output_tensor
             }
-            let tensor_index = TensorIndex(tensors.len());
-            let mut tensor = Tensor { size, ..Default::default() };
-            tensors.push(tensor);
-            node.outputs.push(tensor_index);
+            let meta_output_shape = py_meta!(py_node, "output_shape", PyTuple).unwrap();
+            let output_shapes = if let Some(true) = py_meta!(py_node, "output_is_tuple") {
+                meta_output_shape.iter(py).map(|x| x.extract(py)).collect::<PyResult<SVec<_>>>()?
+            } else {
+                smallvec![meta_output_shape]
+            };
+            for py_shape in output_shapes.iter() {
+                let mut size = 4; // 4 bytes per element
+                for s in py_shape.iter(py) {
+                    size *= s.extract::<usize>(py)?
+                }
+                let tensor_index = TensorIndex(tensors.len());
+                let mut tensor = Tensor { size, ..Default::default() };
+                tensors.push(tensor);
+                node.outputs.push(tensor_index);
+            }
         }
 
         // input links

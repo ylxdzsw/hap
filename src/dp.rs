@@ -1,9 +1,9 @@
-use std::{rc::Rc, collections::{BTreeMap, BTreeSet, btree_map::Entry}, ops::Index, cell::RefCell};
+use std::{rc::Rc, collections::{BTreeMap, BTreeSet}, ops::Index, cell::RefCell};
 
 use float_ord::FloatOrd;
 use oh_my_rust::*;
 
-use crate::{graph::{NodeIndex, TensorIndex, Form, Node, Signature, SignatureIndex, Tensor}, SVec, smallvec};
+use crate::{graph::{NodeIndex, TensorIndex, Form, Node, Signature, SignatureIndex, Tensor}, SVec, smallvec, CTRLC_RECEIVED};
 
 type Cache<T> = Rc<RefCell<Option<T>>>;
 
@@ -52,7 +52,7 @@ impl Stage {
     // check if a stage is overlapping (has both computation and communication). Non-overlapping statges can only be followed by an overlapping statge.
     // empty statges (has neither computation and communication) is treated as overlapping to allow the first stage to be non-overlapping
     fn is_overlapping(&self) -> bool {
-        self.has_computation() ^ self.has_communication()
+        !(self.has_computation() ^ self.has_communication())
     }
 
     fn has_computation(&self) -> bool {
@@ -76,10 +76,10 @@ impl DuplicaCut {
         DuplicaCut { next_node, state_tensors, state_tensors_reverse_map: reverse_map }
     }
 
-    fn get_all_in_graph(graph: &Graph) -> Vec<DuplicaCut> {
-        let mut state_tensors = vec![vec![]; graph.nodes.len()];
+    fn get_all_in_graph(g: &Graph) -> Vec<DuplicaCut> {
+        let mut state_tensors = vec![vec![]; g.nodes.len()];
 
-        for (tensor_id, tensor) in graph.tensors.iter().enumerate() {
+        for (tensor_id, tensor) in g.tensors.iter().enumerate() {
             let start = tensor.producer.0;
             let end = tensor.consumers.iter().map(|x| x.0).max().unwrap();
             #[allow(clippy::needless_range_loop)]
@@ -90,6 +90,12 @@ impl DuplicaCut {
 
         state_tensors.push(vec![]); // a trailing cut that cuts after the last node
 
+        for (i, state_tensor) in state_tensors.iter().enumerate() {
+            info!("cut {} has {} tensors, totaling {} states",
+                i, state_tensor.len(), state_tensor.iter().map(|&x| g[x].consumer_forms.len()).product::<usize>()
+            )
+        }
+
         state_tensors.into_iter().enumerate().map(|(i, x)| {
             DuplicaCut::new(NodeIndex(i), x)
         }).collect()
@@ -98,11 +104,50 @@ impl DuplicaCut {
 
 crate::new_index_type!(pub, CutIndex);
 
+// a collection that has one or two forms, ensuring sorted in the case of two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum OneOrTwoForms { One(Form), Two(Form, Form) }
+
+impl OneOrTwoForms {
+    fn one(form: Form) -> OneOrTwoForms {
+        OneOrTwoForms::One(form)
+    }
+
+    fn two(a: Form, b: Form) -> OneOrTwoForms {
+        OneOrTwoForms::Two(std::cmp::min(a, b), std::cmp::max(a, b))
+    }
+
+    fn insert(&mut self, form: Form) {
+        *self = OneOrTwoForms::two(self.unwrap(), form)
+    }
+
+    fn contains(&self, form: Form) -> bool {
+        match *self {
+            OneOrTwoForms::One(a) => a == form,
+            OneOrTwoForms::Two(a, b) => a == form || b == form,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            OneOrTwoForms::One(..) => 1,
+            OneOrTwoForms::Two(..) => 2,
+        }
+    }
+
+    fn unwrap(self) -> Form {
+        match self {
+            OneOrTwoForms::One(form) => form,
+            OneOrTwoForms::Two(..) => panic!("unwrap two forms")
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DuplicaState {
     cut: CutIndex,
     next_communicatable: TensorIndex, // heuristic: the smallest index tensor that can communicate
-    available_forms: Vec<BTreeSet<Form>>, // all available forms for each state tensor
+    available_forms: Vec<OneOrTwoForms>, // all available forms for each state tensor
 
     next_computations: Cache<SVec<(DuplicaState, Computation)>>,
     next_communications: Cache<SVec<(DuplicaState, Communication)>>,
@@ -112,7 +157,7 @@ pub struct DuplicaState {
 }
 
 impl DuplicaState {
-    fn new(cut: CutIndex, next_communicatable: TensorIndex, available_forms: Vec<BTreeSet<Form>>) -> DuplicaState {
+    fn new(cut: CutIndex, next_communicatable: TensorIndex, available_forms: Vec<OneOrTwoForms>) -> DuplicaState {
         DuplicaState {
             cut, next_communicatable, available_forms,
             next_computations: Default::default(),
@@ -141,13 +186,14 @@ impl DuplicaState {
                     self.cut + 1,
                     self.next_communicatable,
                     next_cut.state_tensors.iter().map(|tensor_index| {
-                        g[self.cut].state_tensors_reverse_map.get(tensor_index).map(|&i| self.available_forms[i].clone()).unwrap_or_default()
+                        g[self.cut].state_tensors_reverse_map.get(tensor_index)
+                            .map(|&i| self.available_forms[i])
+                            .unwrap_or_else(|| {
+                                let i = next_node.outputs.iter().position(|x| x == tensor_index).unwrap();
+                                OneOrTwoForms::one(signature.output_forms[i])
+                            })
                     }).collect()
                 );
-                for (output_tensor_index, &output_tensor_form) in next_node.outputs.iter().zip(signature.output_forms.iter()) {
-                    let i = next_cut.state_tensors_reverse_map[output_tensor_index];
-                    next_state.available_forms[i].insert(output_tensor_form);
-                }
                 let computation = Computation { node: g[self.cut].next_node, signature: SignatureIndex(signature_id) };
                 result.push((next_state, computation))
             }
@@ -159,6 +205,7 @@ impl DuplicaState {
     fn get_possible_computations(&self, g: &Graph) -> Vec<(DuplicaState, SVec<Computation, PROGRESS_LIMIT>)> {
         self.possible_computations.borrow_mut().get_or_insert_with(|| {
             let mut results: Vec<_> = self.get_next_computations(g).into_iter().map(|(state, computation)| (state, smallvec![computation])).collect();
+
             let mut next_level = results.clone();
             while !next_level.is_empty() {
                 let mut next_next_level = vec![];
@@ -187,13 +234,12 @@ impl DuplicaState {
                 continue
             }
 
-            // cut some needless communications
-            if g[tensor_index].consumers.len() <= 1 && available_forms.len() >= 2 {
+            if available_forms.len() >= 2 {
                 continue
             }
 
             for &form in g[tensor_index].consumer_forms.iter() {
-                if available_forms.contains(&form) {
+                if available_forms.contains(form) {
                     continue
                 }
 
@@ -205,7 +251,7 @@ impl DuplicaState {
                 );
                 let communication = Communication {
                     tensor: tensor_index,
-                    old_form: *available_forms.iter().next().unwrap(),
+                    old_form: available_forms.unwrap(),
                     new_form: form
                 };
                 next_state.available_forms[i].insert(form);
@@ -240,8 +286,8 @@ impl DuplicaState {
 
     fn is_signature_compatable(&self, gh: &Graph, node: &Node, signature: &Signature) -> bool {
         for (input_tensor_index, input_tensor_form) in node.inputs.iter().zip(signature.input_forms.iter()) {
-            let available_forms = self.available_forms[gh[self.cut].state_tensors_reverse_map[input_tensor_index]].clone();
-            if available_forms.contains(input_tensor_form) {
+            let available_forms = self.available_forms[gh[self.cut].state_tensors_reverse_map[input_tensor_index]];
+            if available_forms.contains(*input_tensor_form) {
                 continue
             }
             return false
@@ -270,10 +316,7 @@ impl State {
 impl State {
     fn get_pareto_cell_key(&self) -> ParetoCellKey {
         let State(a, b, _) = self;
-        (
-            a.available_forms.iter().map(|x| x.iter().copied().collect()).collect(),
-            b.available_forms.iter().map(|x| x.iter().copied().collect()).collect()
-        )
+        (a.available_forms.clone(), b.available_forms.clone())
     }
 }
 
@@ -336,7 +379,8 @@ pub fn dp2(graph: &crate::graph::Graph) {
     pareto[0][0].insert(initial_state.get_pareto_cell_key(), initial_state);
 
     for cut_index_a in 0..n_cut {
-        for cut_index_b in cut_index_a.saturating_sub(PROGRESS_LIMIT)..cut_index_a {
+        for cut_index_b in cut_index_a.saturating_sub(PROGRESS_LIMIT)..=cut_index_a {
+            info!("expanding on ({},{}) with {} states", cut_index_a, cut_index_b, pareto[cut_index_a][cut_index_b].len());
             let mut visited: BTreeSet<ParetoCellKey> = BTreeSet::default();
             loop {
                 let next_pair = pareto[cut_index_a][cut_index_b].iter()
@@ -350,11 +394,14 @@ pub fn dp2(graph: &crate::graph::Graph) {
                     break
                 }
             }
+            info!("expanded on ({},{}) with {} states", cut_index_a, cut_index_b, pareto[cut_index_a][cut_index_b].len());
+            // eager free memory
+            pareto[cut_index_a][cut_index_b].clear()
         }
     }
 }
 
-type ParetoCellKey = (Vec<SVec<Form>>, Vec<SVec<Form>>);
+type ParetoCellKey = (Vec<OneOrTwoForms>, Vec<OneOrTwoForms>);
 type Pareto = Vec<Vec<BTreeMap<ParetoCellKey, State>>>;
 
 #[allow(clippy::redundant_clone)]
@@ -403,6 +450,7 @@ fn explore_next_stage(g: &Graph, pareto: &mut Pareto, state: State) {
     if !prev_stage.is_overlapping() {
         return
     }
+
     for (new_a, communications_a) in a.get_possible_communications(g).into_iter().chain([(a.clone(), smallvec![])]) {
         for (new_b, communications_b) in b.get_possible_communications(g).into_iter().chain([(b.clone(), smallvec![])]) {
             if communications_a.is_empty() && communications_b.is_empty() {
@@ -443,11 +491,14 @@ fn explore_next_stage(g: &Graph, pareto: &mut Pareto, state: State) {
 }
 
 fn update_pareto(g: &Graph, pareto: &mut Pareto, state: State) {
+    if CTRLC_RECEIVED.load(std::sync::atomic::Ordering::Relaxed) {
+        panic!("interupted")
+    }
     let key = state.get_pareto_cell_key();
     let new_cost = state.2.acc_cost;
     match pareto[state.0.cut.0][state.1.cut.0].entry(key) {
-        Entry::Vacant(x) => x.insert(state).ignore(),
-        Entry::Occupied(mut x) if new_cost <= x.get().2.acc_cost => *x.get_mut() = state,
+        std::collections::btree_map::Entry::Vacant(x) => x.insert(state).ignore(),
+        std::collections::btree_map::Entry::Occupied(mut x) if new_cost <= x.get().2.acc_cost => *x.get_mut() = state,
         _ => {}
     }
 }
