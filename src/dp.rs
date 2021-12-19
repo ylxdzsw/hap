@@ -1,4 +1,7 @@
-use std::{rc::Rc, collections::{BTreeMap, BTreeSet}, ops::Index, cell::RefCell};
+use std::{rc::Rc, collections::{BTreeMap, BTreeSet, btree_map::Entry}, ops::Index, cell::RefCell};
+
+use float_ord::FloatOrd;
+use oh_my_rust::*;
 
 use crate::{graph::{NodeIndex, TensorIndex, Form, Node, Signature, SignatureIndex, Tensor}, SVec, smallvec};
 
@@ -184,6 +187,11 @@ impl DuplicaState {
                 continue
             }
 
+            // cut some needless communications
+            if g[tensor_index].consumers.len() <= 1 && available_forms.len() >= 2 {
+                continue
+            }
+
             for &form in g[tensor_index].consumer_forms.iter() {
                 if available_forms.contains(&form) {
                     continue
@@ -247,6 +255,7 @@ impl DuplicaState {
     }
 }
 
+#[derive(Clone)]
 struct State(DuplicaState, DuplicaState, Rc<Stage>);
 
 impl State {
@@ -255,6 +264,16 @@ impl State {
         let b = DuplicaState::new(0.into(), 0.into(), vec![]);
         let empty_stage = Rc::new(Stage::default());
         State(a, b, empty_stage)
+    }
+}
+
+impl State {
+    fn get_pareto_cell_key(&self) -> ParetoCellKey {
+        let State(a, b, _) = self;
+        (
+            a.available_forms.iter().map(|x| x.iter().copied().collect()).collect(),
+            b.available_forms.iter().map(|x| x.iter().copied().collect()).collect()
+        )
     }
 }
 
@@ -310,25 +329,36 @@ pub fn dp2(graph: &crate::graph::Graph) {
     let g = Graph::new(graph);
     let n_cut = g.n_cuts();
 
-    let mut pareto: Vec<Vec<Vec<State>>> = // the (i, j)-th element is a list of states and corresponding best stage when the first duplica is on cut i and the second is on cut j
-        (0..n_cut).map(|_| (0..n_cut).map(|_| vec![]).collect()).collect();
+    let mut pareto: Pareto = // the (i, j)-th element is a list of states and corresponding best stage when the first duplica is on cut i and the second is on cut j
+        (0..n_cut).map(|_| (0..n_cut).map(|_| Default::default()).collect()).collect();
 
     let initial_state = State::empty(&g);
-    pareto[0][0].push(initial_state);
+    pareto[0][0].insert(initial_state.get_pareto_cell_key(), initial_state);
 
-    #[allow(clippy::needless_range_loop)]
     for cut_index_a in 0..n_cut {
         for cut_index_b in cut_index_a.saturating_sub(PROGRESS_LIMIT)..cut_index_a {
-            for state in pareto[cut_index_a][cut_index_b].iter() {
-
-
+            let mut visited: BTreeSet<ParetoCellKey> = BTreeSet::default();
+            loop {
+                let next_pair = pareto[cut_index_a][cut_index_b].iter()
+                    .filter(|(k, v)| !visited.contains(k))
+                    .min_by_key(|(k, v)| FloatOrd(v.2.acc_cost))
+                    .map(|(k, v)| (k.clone(), v.clone()));
+                if let Some((k, v)) = next_pair {
+                    visited.insert(k);
+                    explore_next_stage(&g, &mut pareto, v);
+                } else {
+                    break
+                }
             }
         }
     }
 }
 
+type ParetoCellKey = (Vec<SVec<Form>>, Vec<SVec<Form>>);
+type Pareto = Vec<Vec<BTreeMap<ParetoCellKey, State>>>;
+
 #[allow(clippy::redundant_clone)]
-fn explore_next_stage(g: &Graph, pareto: &mut Vec<Vec<Vec<State>>>, state: State) {
+fn explore_next_stage(g: &Graph, pareto: &mut Pareto, state: State) {
     let State(a, b, prev_stage) = state;
 
     // 1. computation on a, communication on b
@@ -345,8 +375,8 @@ fn explore_next_stage(g: &Graph, pareto: &mut Vec<Vec<Vec<State>>>, state: State
                 acc_cost: prev_stage.acc_cost,
                 prev: Some(prev_stage.clone()),
             });
-            let new_state = State(new_a.clone(), new_b, stage.clone());
-            update_pareto(g, pareto, new_state, stage);
+            let new_state = State(new_a.clone(), new_b, stage);
+            update_pareto(g, pareto, new_state);
         }
     }
 
@@ -364,8 +394,8 @@ fn explore_next_stage(g: &Graph, pareto: &mut Vec<Vec<Vec<State>>>, state: State
                 acc_cost: prev_stage.acc_cost,
                 prev: Some(prev_stage.clone()),
             });
-            let new_state = State(new_a, new_b.clone(), stage.clone());
-            update_pareto(g, pareto, new_state, stage);
+            let new_state = State(new_a, new_b.clone(), stage);
+            update_pareto(g, pareto, new_state);
         }
     }
 
@@ -386,8 +416,8 @@ fn explore_next_stage(g: &Graph, pareto: &mut Vec<Vec<Vec<State>>>, state: State
                 acc_cost: prev_stage.acc_cost,
                 prev: Some(prev_stage.clone()),
             });
-            let new_state = State(new_a.clone(), new_b, stage.clone());
-            update_pareto(g, pareto, new_state, stage);
+            let new_state = State(new_a.clone(), new_b, stage);
+            update_pareto(g, pareto, new_state);
         }
     }
     for (new_a, computations_a) in a.get_possible_computations(g).into_iter().chain([(a.clone(), smallvec![])]) {
@@ -406,15 +436,20 @@ fn explore_next_stage(g: &Graph, pareto: &mut Vec<Vec<Vec<State>>>, state: State
                 acc_cost: prev_stage.acc_cost,
                 prev: Some(prev_stage.clone()),
             });
-            let new_state = State(new_a.clone(), new_b, stage.clone());
-            update_pareto(g, pareto, new_state, stage);
+            let new_state = State(new_a.clone(), new_b, stage);
+            update_pareto(g, pareto, new_state);
         }
     }
 }
 
-// try append a stage that leads to state in the pareto
-fn update_pareto(g: &Graph, pareto: &mut Vec<Vec<Vec<State>>>, state: State, stage: Rc<Stage>) {
-
+fn update_pareto(g: &Graph, pareto: &mut Pareto, state: State) {
+    let key = state.get_pareto_cell_key();
+    let new_cost = state.2.acc_cost;
+    match pareto[state.0.cut.0][state.1.cut.0].entry(key) {
+        Entry::Vacant(x) => x.insert(state).ignore(),
+        Entry::Occupied(mut x) if new_cost <= x.get().2.acc_cost => *x.get_mut() = state,
+        _ => {}
+    }
 }
 
 // TODO: extra branches explored in tensor forms. The possible tensor forms may be less than consumer_forms due to 1. next_communicatable prevent some signatures such that it cannot be used and 2. it has multiple consumers and some has already finished
