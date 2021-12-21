@@ -3,7 +3,7 @@
 
 #![allow(unused)]
 
-use std::{collections::BTreeMap, borrow::Cow, sync::atomic::AtomicBool};
+use std::{collections::{BTreeMap, BTreeSet}, borrow::Cow, sync::atomic::AtomicBool};
 
 use oh_my_rust::*;
 use cpython::{PyResult, PyTuple, ToPyObject, PythonObject, ObjectProtocol, Python, PyList, PyObject, PyDict};
@@ -33,7 +33,8 @@ cpython::py_module_initializer!(spmd, |py, m| {
 
     #[allow(clippy::manual_strip)]
     m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyObject, hints: PyDict) -> PyResult<PyTuple> {
-        let graph = build_graph(py, py_nodes, &profiler, hints)?;
+        let graph = build_graph(py, &py_nodes, &profiler, hints)?;
+        dump_graph(py, &py_nodes, &graph);
         dp::dp2(&graph);
         Ok((2, ).to_py_object(py))
     }))?;
@@ -41,7 +42,7 @@ cpython::py_module_initializer!(spmd, |py, m| {
     Ok(())
 });
 
-fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict) -> PyResult<Graph> {
+fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict) -> PyResult<Graph> {
     macro_rules! py_meta {
         ($py_node: expr, $meta_name: expr) => { py_meta!($py_node, $meta_name, _) };
         ($py_node: expr, $meta_name: expr, $out_type: ty) => {{
@@ -244,6 +245,27 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
     }
 
     Ok(Graph { nodes, tensors })
+}
+
+fn dump_graph(py: Python, py_nodes: &PyList, graph: &Graph) -> PyResult<()> {
+    for (node_id, node) in graph.nodes.iter().enumerate() {
+        let py_node = py_nodes.get_item(py, node.origin_id);
+        println!("{node_id} ({raw_id}) {name} {inputs:?}",
+            node_id = node_id,
+            raw_id = node.origin_id,
+            name = py_node.getattr(py, "name")?.extract::<Cow<str>>(py)?,
+            inputs = node.inputs.iter().map(|x| x.0).collect::<Vec<_>>()
+        );
+        for tensor_id in node.outputs.iter() {
+            let tensor = &graph.tensors[tensor_id.0];
+            println!("  -> {tensor_id} {users:?} {forms:?}",
+                tensor_id = tensor_id.0,
+                users = tensor.consumers.iter().map(|x| x.0).collect::<Vec<_>>(),
+                forms = tensor.consumer_forms.iter().chain(tensor.producer_forms.iter()).collect::<BTreeSet<_>>()
+            );
+        }
+    }
+    Ok(())
 }
 
 macro_rules! new_index_type {

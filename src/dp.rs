@@ -80,6 +80,9 @@ impl DuplicaCut {
         let mut state_tensors = vec![vec![]; g.nodes.len()];
 
         for (tensor_id, tensor) in g.tensors.iter().enumerate() {
+            if tensor.consumers.is_empty() { // for some .shape tensors, only some of the outputs (size of specific dimensions) are used
+                continue
+            }
             let start = tensor.producer.0;
             let end = tensor.consumers.iter().map(|x| x.0).max().unwrap();
             #[allow(clippy::needless_range_loop)]
