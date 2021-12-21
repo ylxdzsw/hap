@@ -9,7 +9,7 @@ use oh_my_rust::*;
 use cpython::{PyResult, PyTuple, ToPyObject, PythonObject, ObjectProtocol, Python, PyList, PyObject, PyDict};
 use smallvec::{SmallVec, smallvec};
 
-use crate::graph::{Tensor, Node, TensorIndex, Signature, Form, Graph, NodeIndex};
+use crate::graph::{Tensor, Node, TensorIndex, Signature, Form, Graph, NodeIndex, OpKind};
 
 mod graph;
 mod dp;
@@ -57,9 +57,7 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
     let n = py_nodes.len(py);
 
     let mut tensors: Vec<Tensor> = vec![];
-    let mut nodes: Vec<Option<Node>> = Vec::with_capacity(n);
-
-    let mut tensor_map: BTreeMap<usize, TensorIndex> = Default::default(); // node_id to tensor. This is used for adaptive nodes whose entry in the nodes list is None
+    let mut nodes: Vec<Node> = Vec::with_capacity(n); // the node collection starts as one-to-one mapping of python nodes, then remove is_adaptive nodes before assigning node id (is_adaptive nodes are identified by empty signatures)
 
     for (id, py_node) in py_nodes.iter(py).enumerate() {
         debug_assert_eq!(id, py_meta!(py_node, "id").unwrap());
@@ -72,11 +70,29 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
             signatures: Default::default(),
         };
 
+        // adaptive nodes take a special path. It only sets its outputs as the same of the input and skip all others.
+        if let Some(true) = py_meta!(py_node, "is_adaptive", bool) {
+            let py_inputs = py_node.getattr(py, "all_input_nodes")?.cast_into::<PyList>(py)?;
+            debug_assert_eq!(py_inputs.len(py), 1);
+            let input_node_id = py_meta!(py_inputs.get_item(py, 0), "id", usize).unwrap();
+            let input_node = &nodes[input_node_id];
+
+            let input_index = if input_node.outputs.len() > 1 { // input is tuple, assume this node is getitem
+                py_node.getattr(py, "args")?.get_item(py, 1usize)?.extract(py)?
+            } else {
+                0
+            };
+            node.outputs = smallvec![input_node.outputs[input_index]];
+            nodes.push(node);
+            continue
+        }
+
         // generate output tensors and link them
         'gen_output_tensor: {
-            if &*py_node.getattr(py, "op")?.extract::<Cow<str>>(py)? == "output" {
+            if let OpKind::Output = node.op_kind {
                 break 'gen_output_tensor
             }
+
             let meta_output_shape = py_meta!(py_node, "output_shape", PyTuple).unwrap();
             let output_shapes = if let Some(true) = py_meta!(py_node, "output_is_tuple") {
                 meta_output_shape.iter(py).map(|x| x.extract(py)).collect::<PyResult<SVec<_>>>()?
@@ -98,45 +114,32 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
         // input links
         for py_input_node in py_node.getattr(py, "all_input_nodes")?.cast_into::<PyList>(py)?.iter(py) {
             let input_node_id = py_meta!(py_input_node, "id", usize).unwrap();
+            let input_node = &nodes[input_node_id];
 
-            let input_tensor_index = if let Some(input_node) = &nodes[input_node_id] {
-                let input_index = if input_node.outputs.len() > 1 { // input is tuple, assume this node is getitem
-                    py_node.getattr(py, "args")?.get_item(py, 1usize)?.extract(py)?
-                } else {
-                    0
-                };
-                input_node.outputs[input_index]
-            } else {
-                tensor_map[&input_node_id]
-            };
+            debug_assert_eq!(input_node.outputs.len(), 1);
+            let input_tensor_index = input_node.outputs[0];
 
             debug_assert!(!node.inputs.contains(&input_tensor_index));
             node.inputs.push(input_tensor_index)
         }
 
-        // replace adaptive nodes
-        if let Some(true) = py_meta!(py_node, "is_adaptive", bool) {
-            nodes.push(None);
-            tensor_map.insert(id, node.inputs[0]);
-            continue
-        }
-
-        match &*py_node.getattr(py, "op")?.extract::<Cow<str>>(py)? {
-            "output" => { // the output node only has a Reduce signature
+        // set signatures
+        match node.op_kind {
+            OpKind::Output => { // the output node only has a Reduce signature
                 let reduce_signature = Signature {
                     input_forms: smallvec![Form::Reduce],
                     ..Default::default()
                 };
                 node.signatures.push(reduce_signature);
             }
-            "placeholder" => { // the placeholder only has a Full signature. We assume that each worker load the full batch then performing dynamic slicing
+            OpKind::Placeholder => { // the placeholder only has a Full signature. We assume that each worker load the full batch then performing dynamic slicing
                 let full_signature = Signature {
                     output_forms: smallvec![Form::Full],
                     ..Default::default()
                 };
                 node.signatures.push(full_signature);
             }
-            "get_attr" => {
+            OpKind::GetAttr => {
                 let replication_signature = Signature { // this is the parameters analog of full signature
                     output_forms: smallvec![Form::Replicate],
                     ..Default::default()
@@ -150,7 +153,7 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
                     node.signatures.push(gather_signature)
                 }
             }
-            "call_function" | "call_method" => {
+            OpKind::CallFunction | OpKind::CallMethod => {
                 // let flops = py_meta!(py_node, "flops").unwrap_or_default();
 
                 let full_signature = Signature {
@@ -176,11 +179,7 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
                         let py_arg_node = arg_dict.as_object().get_item(py, arg_name)?;
                         if py_arg_node.hasattr(py, "meta")? { // is a node, not literal
                             let arg_tensor_id = py_meta!(py_arg_node, "id", usize).unwrap();
-                            let arg_tensor = if let Some(arg_node) = &nodes[arg_tensor_id] {
-                                &arg_node.outputs[0]
-                            } else {
-                                &tensor_map[&arg_tensor_id]
-                            };
+                            let arg_tensor = &nodes[arg_tensor_id].outputs[0];
                             let i = node.inputs.iter().position(|x| x == arg_tensor).expect("input node not in inputs");
                             input_forms[i] = Some(arg_form.extract::<Cow<str>>(py)?.parse().unwrap());
                         }
@@ -193,7 +192,6 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
                     })
                 }
             }
-            _ => unreachable!()
         }
 
         'process_hints: {
@@ -212,10 +210,10 @@ fn build_graph(py: Python, py_nodes: PyList, profiler: &PyObject, hints: PyDict)
             }
         }
 
-        nodes.push(Some(node));
+        nodes.push(node);
     }
 
-    let nodes: Vec<_> = nodes.into_iter().flatten().collect();
+    let nodes: Vec<_> = nodes.into_iter().filter(|x| !x.signatures.is_empty()).collect();
 
     for (node_index, node) in nodes.iter().enumerate() {
         let node_index = NodeIndex(node_index);
