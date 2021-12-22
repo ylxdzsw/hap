@@ -506,4 +506,3 @@ fn update_pareto(g: &Graph, pareto: &mut Pareto, state: State) {
     }
 }
 
-// TODO: extra branches explored in tensor forms. The possible tensor forms may be less than consumer_forms due to 1. next_communicatable prevent some signatures such that it cannot be used and 2. it has multiple consumers and some has already finished
