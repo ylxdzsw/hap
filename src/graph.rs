@@ -8,12 +8,15 @@ pub struct Node {
     pub op_kind: OpKind,
     pub inputs: SVec<TensorIndex>,
     pub outputs: SVec<TensorIndex>,
-    pub signatures: Vec<Signature>
+    pub signatures: Vec<Signature>,
+
+    pub flops: u64,
+    pub name: String,
 }
 
 #[derive(Clone, Default, Debug)]
 pub struct Tensor {
-    pub size: usize,
+    pub size: u64,
     pub producer: NodeIndex,
     pub consumers: SVec<NodeIndex>,
     pub producer_forms: Vec<Form>, // all possible forms that could be produced
@@ -79,8 +82,6 @@ impl FromStr for OpKind {
 pub struct Signature {
     pub input_forms: SVec<Form>,
     pub output_forms: SVec<Form>,
-
-    pub cost: f64,
 }
 
 crate::new_index_type!(pub, NodeIndex);

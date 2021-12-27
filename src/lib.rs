@@ -12,6 +12,7 @@ use smallvec::{SmallVec, smallvec};
 use crate::graph::{Tensor, Node, TensorIndex, Signature, Form, Graph, NodeIndex, OpKind};
 
 mod graph;
+mod profiler;
 // mod dp2;
 mod dp3;
 
@@ -36,7 +37,10 @@ cpython::py_module_initializer!(spmd, |py, m| {
     m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyObject, hints: PyDict) -> PyResult<PyTuple> {
         let graph = build_graph(py, &py_nodes, &profiler, hints)?;
         dump_graph(py, &py_nodes, &graph);
-        dp3::dp3(&graph);
+        let computation_profiler = profiler::FlopsProfiler { device_flops: 18_000_000_000_00, n_devices: 4 };
+        let communication_profiler = profiler::BandwidthProfiler { bandwidth: 2_000_000_000, n_devices: 4 };
+        let profiler = (computation_profiler, communication_profiler);
+        dp3::dp3(&graph, &profiler);
         Ok((2, ).to_py_object(py))
     }))?;
 
@@ -70,6 +74,8 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
             inputs: Default::default(),
             outputs: Default::default(),
             signatures: Default::default(),
+            flops: py_meta!(py_node, "flops").unwrap_or_default(),
+            name: py_node.getattr(py, "name")?.extract(py)?
         };
 
         // adaptive nodes take a special path. It only sets its outputs as the same of the input and skip all others.
@@ -104,7 +110,7 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
             for py_shape in output_shapes.iter() {
                 let mut size = 4; // 4 bytes per element
                 for s in py_shape.iter(py) {
-                    size *= s.extract::<usize>(py)?
+                    size *= s.extract::<u64>(py)?
                 }
                 let tensor_index = TensorIndex(tensors.len());
                 let mut tensor = Tensor { size, ..Default::default() };
@@ -156,12 +162,9 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
                 }
             }
             OpKind::CallFunction | OpKind::CallMethod => {
-                // let flops = py_meta!(py_node, "flops").unwrap_or_default();
-
                 let full_signature = Signature {
                     input_forms: node.inputs.iter().map(|_| Form::Full).collect(),
                     output_forms: node.outputs.iter().map(|_| Form::Full).collect(),
-                    cost: 0., //comp_profiler.get_time(flops, None),
                 };
                 node.signatures.push(full_signature);
 
@@ -190,24 +193,22 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
                     let cost = 0.0; // comp_profiler.get_time(flops, &input_forms);
                     node.signatures.push(Signature {
                         input_forms: input_forms.into_iter().collect::<Option<SVec<_>>>().unwrap(),
-                        output_forms, cost,
+                        output_forms,
                     })
                 }
             }
         }
 
         'process_hints: {
-            let pyname = py_node.getattr(py, "name")?;
-            let name: Cow<str> = pyname.extract(py)?;
-            if let Some(forms) = hints.get_item(py, &name) {
+            if let Some(forms) = hints.get_item(py, &node.name) {
                 let forms: Vec<Form> = forms.extract::<PyList>(py)?.iter(py).map(|x| x.extract(py).map(|x: Cow<str>| x.parse::<Form>().unwrap())).collect::<PyResult<_>>()?;
                 if node.outputs.len() != 1 {
-                    warn!("hints for {} ignored because the node has multiple outputs", name);
+                    warn!("hints for {} ignored because the node has multiple outputs", node.name);
                     break 'process_hints
                 }
                 node.signatures.retain(|signature| forms.contains(&signature.output_forms[0]));
                 if node.signatures.is_empty() {
-                    panic!("hints for {} cannot be satisfied!", name)
+                    panic!("hints for {} cannot be satisfied!", node.name)
                 }
             }
         }
@@ -254,7 +255,7 @@ fn dump_graph(py: Python, py_nodes: &PyList, graph: &Graph) -> PyResult<()> {
         println!("{node_id} ({raw_id}) {name} {inputs:?}",
             node_id = node_id,
             raw_id = node.origin_id,
-            name = py_node.getattr(py, "name")?.extract::<Cow<str>>(py)?,
+            name = node.name,
             inputs = node.inputs.iter().map(|x| x.0).collect::<Vec<_>>()
         );
         for tensor_id in node.outputs.iter() {

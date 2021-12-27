@@ -2,7 +2,7 @@ use std::{rc::Rc, collections::{BTreeMap, BTreeSet}, ops::Index, cell::RefCell};
 
 use oh_my_rust::*;
 
-use crate::{graph::{NodeIndex, TensorIndex, Form, Node, Signature, SignatureIndex, Tensor}, SVec, smallvec, CTRLC_RECEIVED};
+use crate::{graph::{NodeIndex, TensorIndex, Form, Node, Signature, SignatureIndex, Tensor}, SVec, smallvec, CTRLC_RECEIVED, profiler::Profiler};
 
 const PROGRESS_LIMIT: usize = 10;
 
@@ -12,24 +12,11 @@ pub struct Computation {
     signature: SignatureIndex
 }
 
-impl Computation {
-    fn cost(&self, g: Graph) -> f64 {
-        g[self.node].signatures[self.signature.0].cost
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct Communication {
     tensor: TensorIndex,
     old_form: Form,
     new_form: Form
-}
-
-impl Communication {
-    fn cost(&self, g: Graph) -> f64 {
-        // g[self.tensor].size
-        todo!()
-    }
 }
 
 #[derive(Clone, Default)]
@@ -210,6 +197,7 @@ struct Graph<'g> {
     nodes: &'g [Node],
     tensors: &'g [Tensor],
     cuts: Vec<Cut>,
+    profiler: &'g dyn Profiler
 }
 
 impl<'g> Index<NodeIndex> for Graph<'g> {
@@ -237,9 +225,9 @@ impl<'g> Index<CutIndex> for Graph<'g> {
 }
 
 impl<'g> Graph<'g> {
-    fn new(graph: &crate::graph::Graph) -> Graph {
+    fn new(graph: &'g crate::graph::Graph, profiler: &'g dyn Profiler) -> Graph<'g> {
         let crate::graph::Graph { nodes, tensors } = graph;
-        let mut result = Graph { nodes, tensors, cuts: vec![] };
+        let mut result = Graph { nodes, tensors, cuts: vec![], profiler };
         result.cuts = Cut::get_all_in_graph(&result);
         result
     }
@@ -253,37 +241,62 @@ impl<'g> Graph<'g> {
     }
 }
 
-pub fn dp3(graph: &crate::graph::Graph) {
-    let g = Graph::new(graph);
+pub fn dp3(graph: &crate::graph::Graph, profiler: &dyn Profiler) {
+    let g = Graph::new(graph, profiler);
     let n_cut = g.n_cuts();
 
     let mut pareto: Pareto = (0..n_cut).map(|_| Default::default()).collect();
     pareto[0].insert(vec![], vec![Rc::new(Stage::default())]);
 
     #[allow(clippy::needless_range_loop)]
-    for cut_index in 0..n_cut {
+    for cut_index in 0..n_cut-2 {
         info!("expanding on cut {} with {} states and {} paths", cut_index, pareto[cut_index].len(), pareto[cut_index].values().map(|x| x.len()).sum::<usize>());
         for (available_forms, prev_stages) in std::mem::take(&mut pareto[cut_index]) { // take out for eager free memory as well as to release reference to pareto
             let state = State { cut: cut_index.into(), available_forms };
             explore_next_stage(&g, &mut pareto, state, &prev_stages);
         }
     }
+
+    let mut best_time = f64::MAX;
+    let mut best_path = None;
+    for (available_forms, stages) in pareto[n_cut-2].iter() {
+        if available_forms[0].contains(Form::Reduce) {
+            for stage in stages {
+                let time = stage.cost.acc_time + stage.cost.debt;
+                if best_path.is_none() || time < best_time {
+                    best_time = time;
+                    best_path = Some(stage)
+                }
+            }
+            break
+        }
+    }
+    dump_path(&g, best_path.unwrap())
 }
 
 // Pareto[cut][state_tensors] = list of pareto stages leads to it
 // conceptually state -> vec<stage> but orgnized like this for better indexing & eager memory relcaim
 type Pareto = Vec<BTreeMap<Vec<OneOrTwoForms>, Vec<Rc<Stage>>>>;
 
-// explore all stages that could be append on the state and try to add them to the pareto
+// explore all stages that could be appended to the state and try to add them to the pareto
 fn explore_next_stage(g: &Graph, pareto: &mut Pareto, state: State, prev_stages: &[Rc<Stage>]) {
     let communicatable_tensors: BTreeSet<_> = g[state.cut].state_tensors.iter().copied().collect();
     let mut to_explore = vec![(state, SVec::<Computation, PROGRESS_LIMIT>::default(), SVec::<Communication>::default())];
     while let Some((state, computations, communications)) = to_explore.pop() {
+        let forward_comp_time = computations.iter().map(|comp| g.profiler.get_computation_forward_time(&g[comp.node], comp.signature)).sum::<f64>();
+        let backward_comp_time = computations.iter().map(|comp| g.profiler.get_computation_backward_time(&g[comp.node], comp.signature)).sum::<f64>();
+        let forward_comm_time = communications.iter().map(|comm| g.profiler.get_communication_forward_time(g[comm.tensor].size, comm.old_form, comm.new_form)).sum::<f64>();
+        let backward_comm_time = communications.iter().map(|comm| g.profiler.get_communication_backward_time(g[comm.tensor].size, comm.old_form, comm.new_form)).sum::<f64>();
+
         for prev_stage in prev_stages.iter().cloned() {
+            let new_acc_time = prev_stage.cost.acc_time +
+                /*forward*/ prev_stage.cost.debt.max(forward_comm_time) + forward_comp_time.max(forward_comm_time) +
+                /*backward*/ (2. * prev_stage.cost.debt).max(backward_comm_time) + backward_comp_time.max(backward_comm_time);
+            let new_debt = forward_comp_time;
             let new_stage = Stage {
                 computations: computations.clone(),
                 communications: communications.clone(),
-                cost: Cost { acc_time: 0.0, debt: 0.0 },
+                cost: Cost { acc_time: new_acc_time, debt: new_debt },
                 prev: Some(prev_stage),
             };
             if is_stage_valid(&new_stage) {
@@ -360,3 +373,18 @@ fn update_pareto(g: &Graph, pareto: &mut Pareto, state: &State, stage: Stage) {
     }
 }
 
+fn dump_path(g: &Graph, stage: &Stage) {
+    if let Some(prev) = stage.prev.as_ref() {
+        if !prev.is_empty() {
+            dump_path(g, prev)
+        }
+    }
+    println!("======");
+    for comm in stage.communications.iter() {
+        println!("Tensor {} of size {} from {:?} to {:?}", comm.tensor.0, g[comm.tensor].size, comm.old_form, comm.new_form);
+    }
+    for comp in stage.computations.iter() {
+        let node = &g[comp.node];
+        println!("Node {} ({}) {} {:?} -> {:?}", comp.node.0, node.origin_id, node.name, node.signatures[comp.signature.0].input_forms, node.signatures[comp.signature.0].output_forms);
+    }
+}
