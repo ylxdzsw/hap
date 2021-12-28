@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import torch
+import torch.fx
 import torch.nn.functional as F
 
 class MLP(torch.nn.Module):

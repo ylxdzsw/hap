@@ -1,4 +1,3 @@
-#![feature(const_generics_defaults)]
 #![feature(label_break_value)]
 
 #![allow(unused)]
@@ -37,8 +36,13 @@ cpython::py_module_initializer!(spmd, |py, m| {
     m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyObject, hints: PyDict) -> PyResult<PyTuple> {
         let graph = build_graph(py, &py_nodes, &profiler, hints)?;
         dump_graph(py, &py_nodes, &graph);
-        let computation_profiler = profiler::FlopsProfiler { device_flops: 18_000_000_000_00, n_devices: 4 };
-        let communication_profiler = profiler::BandwidthProfiler { bandwidth: 2_000_000_000, n_devices: 4 };
+        let computation_profiler = profiler::FlopsProfiler { device_flops: 6505771594034, n_devices: 4 };
+        let communication_profiler = profiler::BandwidthProfiler {
+            all_gather:     7678214035,
+            all_reduce:     4572389694,
+            reduce_scatter: 7919165850,
+            all_to_all:     23206060575,
+        };
         let profiler = (computation_profiler, communication_profiler);
         dp3::dp3(&graph, &profiler);
         Ok((2, ).to_py_object(py))

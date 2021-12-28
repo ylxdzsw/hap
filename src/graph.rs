@@ -1,6 +1,8 @@
 use std::str::FromStr;
 
-use super::SVec;
+use oh_my_rust::*;
+
+use super::{SVec, smallvec};
 
 #[derive(Clone, Debug)]
 pub struct Node {
@@ -48,6 +50,22 @@ impl FromStr for Form {
     }
 }
 
+impl Form {
+    pub fn collective_reform(self, new_form: Form) -> Option<SVec<Collective, 2>> {
+        match (self, new_form) {
+            (a, b) if a == b => Some(smallvec![]),
+            (Form::Full, Form::Gather(_)) => Some(smallvec![Collective::DynamicSlice]),
+            (Form::Gather(_), Form::Full) => Some(smallvec![Collective::AllGather]),
+            (Form::Gather(_), Form::Gather(_)) => Some(smallvec![Collective::AllToAll]), // this must not be the same
+            (Form::Reduce, Form::Full) => Some(smallvec![Collective::AllReduce]),
+            (Form::Reduce, Form::Gather(_)) => Some(smallvec![Collective::ReduceScatter]),
+            (Form::Replicate, Form::Full) => Some(smallvec![Collective::Replicate]),
+            (Form::Replicate, Form::Gather(_)) => Some(smallvec![Collective::Replicate, Collective::DynamicSlice]),
+            _ => None
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OpKind { Placeholder, GetAttr, CallFunction, CallMethod, Output }
 
@@ -87,3 +105,20 @@ pub struct Signature {
 crate::new_index_type!(pub, NodeIndex);
 crate::new_index_type!(pub, TensorIndex);
 crate::new_index_type!(pub, SignatureIndex);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Collective { AllGather, AllReduce, ReduceScatter, AllToAll, Replicate, DynamicSlice }
+
+impl Collective {
+    pub fn conjugate(self) -> Option<Self> {
+        match self {
+            Collective::AllGather => Some(Collective::ReduceScatter),
+            Collective::AllReduce => Some(Collective::AllReduce),
+            Collective::ReduceScatter => Some(Collective::AllGather),
+            Collective::AllToAll => Some(Collective::AllToAll),
+            Collective::Replicate => Some(Collective::AllReduce),
+            Collective::DynamicSlice => None,
+        }
+    }
+}

@@ -1,4 +1,4 @@
-use crate::graph::{Node, SignatureIndex, Form};
+use crate::graph::{Node, SignatureIndex, Form, Collective};
 
 pub trait ComputationProfiler {
     fn get_forward_time(&self, node: &Node, signature: SignatureIndex) -> f64;
@@ -55,23 +55,36 @@ impl ComputationProfiler for FlopsProfiler {
 }
 
 pub struct BandwidthProfiler {
-    pub bandwidth: u64,
-    pub n_devices: usize
-    // TODO: ratio of different types of communication
+    pub all_gather: u64,
+    pub all_reduce: u64,
+    pub reduce_scatter: u64,
+    pub all_to_all: u64,
+}
+
+impl BandwidthProfiler {
+    fn get_time(&self, size: u64, op: Collective) -> f64 {
+        match op {
+            Collective::AllGather => (size as f64) / (self.all_gather as f64),
+            Collective::AllReduce => (size as f64) / (self.all_reduce as f64),
+            Collective::ReduceScatter => (size as f64) / (self.reduce_scatter as f64),
+            Collective::AllToAll => (size as f64) / (self.all_to_all as f64),
+            Collective::Replicate => 0.,
+            Collective::DynamicSlice => 0.,
+        }
+    }
 }
 
 impl CommunicationProfiler for BandwidthProfiler {
     fn get_forward_time(&self, size: u64, old_form: Form, new_form: Form) -> f64 {
-        if old_form == Form::Replicate {
-            return (size as f64) / (self.bandwidth as f64) / 2.
-        }
-        (size as f64) / (self.bandwidth as f64)
+        old_form.collective_reform(new_form).expect("cannot reform").into_iter()
+            .map(|collective| self.get_time(size, collective))
+            .sum::<f64>()
     }
 
     fn get_backward_time(&self, size: u64, old_form: Form, new_form: Form) -> f64 {
-        if old_form == Form::Replicate {
-            return (size as f64) / (self.bandwidth as f64) / 2.
-        }
-        (size as f64) / (self.bandwidth as f64)
+        old_form.collective_reform(new_form).expect("cannot reform").into_iter()
+            .flat_map(Collective::conjugate)
+            .map(|collective| self.get_time(size, collective))
+            .sum::<f64>()
     }
 }

@@ -165,6 +165,9 @@ impl State {
                     continue // too many forms
                 }
                 let available_form = available_forms.unwrap();
+                if available_form.collective_reform(input_tensor_form).is_none() {
+                    continue // cannot reform like this
+                }
                 communications.push(Communication { tensor: input_tensor, old_form: available_form, new_form: input_tensor_form })
             }
 
@@ -286,7 +289,13 @@ fn explore_next_stage(g: &Graph, pareto: &mut Pareto, state: State, prev_stages:
         let forward_comp_time = computations.iter().map(|comp| g.profiler.get_computation_forward_time(&g[comp.node], comp.signature)).sum::<f64>();
         let backward_comp_time = computations.iter().map(|comp| g.profiler.get_computation_backward_time(&g[comp.node], comp.signature)).sum::<f64>();
         let forward_comm_time = communications.iter().map(|comm| g.profiler.get_communication_forward_time(g[comm.tensor].size, comm.old_form, comm.new_form)).sum::<f64>();
-        let backward_comm_time = communications.iter().map(|comm| g.profiler.get_communication_backward_time(g[comm.tensor].size, comm.old_form, comm.new_form)).sum::<f64>();
+        let backward_comm_time = communications.iter().map(|comm| {
+            let mut time = g.profiler.get_communication_backward_time(g[comm.tensor].size, comm.old_form, comm.new_form);
+            if comm.old_form == Form::Replicate {
+                time /= 2. // the all-reduce operation for parameters on the backward pass are not blocking, so we give them less weight
+            }
+            time
+        }).sum::<f64>();
 
         for prev_stage in prev_stages.iter().cloned() {
             let new_acc_time = prev_stage.cost.acc_time +
