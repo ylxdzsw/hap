@@ -78,6 +78,9 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
             inputs: Default::default(),
             outputs: Default::default(),
             signatures: Default::default(),
+
+            companions: Default::default(),
+            input_names: Default::default(),
             flops: py_meta!(py_node, "flops").unwrap_or_default(),
             name: py_node.getattr(py, "name")?.extract(py)?
         };
@@ -87,13 +90,17 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
             let py_inputs = py_node.getattr(py, "all_input_nodes")?.cast_into::<PyList>(py)?;
             debug_assert_eq!(py_inputs.len(py), 1);
             let input_node_id = py_meta!(py_inputs.get_item(py, 0), "id", usize).unwrap();
-            let input_node = &nodes[input_node_id];
+            let input_node = &mut nodes[input_node_id];
 
             let input_index = if input_node.outputs.len() > 1 { // input is tuple, assume this node is getitem
                 py_node.getattr(py, "args")?.get_item(py, 1usize)?.extract(py)?
             } else {
                 0
             };
+
+            input_node.companions.resize(input_index + 1, 0);
+            input_node.companions[input_index] = node.origin_id;
+
             node.outputs = smallvec![input_node.outputs[input_index]];
             nodes.push(node);
             continue
@@ -132,7 +139,8 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
             let input_tensor_index = input_node.outputs[0];
 
             debug_assert!(!node.inputs.contains(&input_tensor_index));
-            node.inputs.push(input_tensor_index)
+            node.inputs.push(input_tensor_index);
+            node.input_names.push(input_node.name.clone());
         }
 
         // set signatures
@@ -166,12 +174,6 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
                 }
             }
             OpKind::CallFunction | OpKind::CallMethod => {
-                let full_signature = Signature {
-                    input_forms: node.inputs.iter().map(|_| Form::Full).collect(),
-                    output_forms: node.outputs.iter().map(|_| Form::Full).collect(),
-                };
-                node.signatures.push(full_signature);
-
                 let arg_dict: PyDict = py_meta!(py_node, "arg_dict").expect("no arg_dict in meta");
                 let py_signatures: PyList = py_meta!(py_node, "signatures").expect("no signature found in meta");
                 for py_signature in py_signatures.iter(py) {
@@ -200,6 +202,12 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
                         output_forms,
                     })
                 }
+
+                let full_signature = Signature {
+                    input_forms: node.inputs.iter().map(|_| Form::Full).collect(),
+                    output_forms: node.outputs.iter().map(|_| Form::Full).collect(),
+                };
+                node.signatures.push(full_signature);
             }
         }
 

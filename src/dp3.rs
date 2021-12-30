@@ -1,8 +1,9 @@
 use std::{rc::Rc, collections::{BTreeMap, BTreeSet}, ops::Index, cell::RefCell};
 
+use cpython::{ToPyObject, PyObject, Python, PyList, PyDict, PyResult, PythonObject};
 use oh_my_rust::*;
 
-use crate::{graph::{NodeIndex, TensorIndex, Form, Node, Signature, SignatureIndex, Tensor}, SVec, smallvec, CTRLC_RECEIVED, profiler::Profiler};
+use crate::{graph::{NodeIndex, TensorIndex, Form, Node, Signature, SignatureIndex, Tensor, Collective}, SVec, smallvec, CTRLC_RECEIVED, profiler::Profiler};
 
 const PROGRESS_LIMIT: usize = 10;
 
@@ -17,6 +18,12 @@ pub struct Communication {
     tensor: TensorIndex,
     old_form: Form,
     new_form: Form
+}
+
+impl Communication {
+    pub fn collectives(&self) -> SVec<Collective, 2> {
+        self.old_form.collective_reform(self.new_form).unwrap() // A Communication must be a valid transform
+    }
 }
 
 #[derive(Clone, Default)]
@@ -301,6 +308,10 @@ fn explore_next_stage(g: &Graph, pareto: &mut Pareto, state: State, prev_stages:
             let new_acc_time = prev_stage.cost.acc_time +
                 /*forward*/ prev_stage.cost.debt.max(forward_comm_time) + forward_comp_time.max(forward_comm_time) +
                 /*backward*/ (2. * prev_stage.cost.debt).max(backward_comm_time) + backward_comp_time.max(backward_comm_time);
+            // let new_acc_time = prev_stage.cost.acc_time +
+            //     /*forward*/ prev_stage.cost.debt + forward_comm_time + forward_comp_time + forward_comm_time +
+            //     /*backward*/ (2. * prev_stage.cost.debt) + backward_comm_time + backward_comp_time + backward_comm_time;
+
             let new_debt = forward_comp_time;
             let new_stage = Stage {
                 computations: computations.clone(),
@@ -396,4 +407,41 @@ fn dump_path(g: &Graph, stage: &Stage) {
         let node = &g[comp.node];
         println!("Node {} ({}) {} {:?} -> {:?}", comp.node.0, node.origin_id, node.name, node.signatures[comp.signature.0].input_forms, node.signatures[comp.signature.0].output_forms);
     }
+}
+
+fn export_path(py: Python, g: &Graph, stage: &Stage) -> PyResult<PyList> {
+    let prev = stage.prev.as_ref().unwrap();
+    let mut py_stages = if !prev.is_empty() {
+        export_path(py, g, prev)?
+    } else {
+        PyList::new(py, &[])
+    };
+
+    let mut py_computations = PyList::new(py, &[]);
+    let mut py_communications = PyList::new(py, &[]);
+
+    for communication in &stage.communications {
+        let mut py_communication = PyDict::new(py);
+        py_communication.set_item(py, "origin_node_id", {
+            let producer_node = &g[g[communication.tensor].producer];
+            if producer_node.companions.is_empty() {
+                producer_node.origin_id
+            } else {
+                let i = producer_node.outputs.iter().position(|&x| x == communication.tensor).unwrap();
+                producer_node.companions[i]
+            }
+        })?;
+        py_communication.set_item(py, "old_form", communication.old_form.to_string())?;
+        py_communication.set_item(py, "new_form", communication.new_form.to_string())?;
+        py_communication.set_item(py, "collective_names", {
+            let mut py_collective_names = PyList::new(py, &[]);
+            for collective in communication.collectives() {
+                py_collective_names.append(py, collective.to_string().into_py_object(py).into_object())
+            }
+            py_collective_names
+        })?;
+
+    }
+
+    Ok(py_stages)
 }

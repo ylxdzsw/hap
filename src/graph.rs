@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{str::FromStr, fmt::Display};
 
 use oh_my_rust::*;
 
@@ -11,6 +11,9 @@ pub struct Node {
     pub inputs: SVec<TensorIndex>,
     pub outputs: SVec<TensorIndex>,
     pub signatures: Vec<Signature>,
+
+    pub input_names: SVec<String>, // original node name of the inputs
+    pub companions: SVec<usize>, // the origin_id of adaptive nodes in the output order
 
     pub flops: u64,
     pub name: String,
@@ -33,6 +36,17 @@ pub struct Graph {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Form { Full, Gather(u8), Reduce, Replicate }
+
+impl Display for Form {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Form::Full => write!(f, "full"),
+            Form::Gather(i) => write!(f, "gather_{}", i),
+            Form::Reduce => write!(f, "reduce"),
+            Form::Replicate => write!(f, "replicate"),
+        }
+    }
+}
 
 impl FromStr for Form {
     type Err = ();
@@ -69,14 +83,14 @@ impl Form {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OpKind { Placeholder, GetAttr, CallFunction, CallMethod, Output }
 
-impl ToString for OpKind {
-    fn to_string(&self) -> String {
+impl Display for OpKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OpKind::Placeholder => "placeholder".to_string(),
-            OpKind::GetAttr => "get_attr".to_string(),
-            OpKind::CallFunction => "call_function".to_string(),
-            OpKind::CallMethod => "call_method".to_string(),
-            OpKind::Output => "output".to_string(),
+            OpKind::Placeholder => write!(f, "placeholder"),
+            OpKind::GetAttr => write!(f, "get_attr"),
+            OpKind::CallFunction => write!(f, "call_function"),
+            OpKind::CallMethod => write!(f, "call_method"),
+            OpKind::Output => write!(f, "output"),
         }
     }
 }
@@ -99,7 +113,7 @@ impl FromStr for OpKind {
 #[derive(Clone, Default, Debug)]
 pub struct Signature {
     pub input_forms: SVec<Form>,
-    pub output_forms: SVec<Form>,
+    pub output_forms: SVec<Form>
 }
 
 crate::new_index_type!(pub, NodeIndex);
@@ -119,6 +133,19 @@ impl Collective {
             Collective::AllToAll => Some(Collective::AllToAll),
             Collective::Replicate => Some(Collective::AllReduce),
             Collective::DynamicSlice => None,
+        }
+    }
+}
+
+impl Display for Collective {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Collective::AllGather => write!(f, "all_gather"),
+            Collective::AllReduce => write!(f, "all_reduce"),
+            Collective::ReduceScatter => write!(f, "reduce_scatter"),
+            Collective::AllToAll => write!(f, "all_to_all"),
+            Collective::Replicate => write!(f, "replicate"),
+            Collective::DynamicSlice => write!(f, "dynamic_slice"),
         }
     }
 }

@@ -10,7 +10,7 @@ class MLP(torch.nn.Module):
         super().__init__()
         modlist = []
         for _ in range(nlayers):
-            modlist.append(torch.nn.Linear(nhid, nhid, bias=False))
+            modlist.append(torch.nn.Linear(nhid, nhid))
             modlist.append(torch.nn.Sigmoid())
         self.layers = torch.nn.ModuleList(modlist)
 
@@ -22,7 +22,7 @@ class MLP(torch.nn.Module):
 class MLP2(torch.nn.Module):
     def __init__(self, nhid=2048, nlayers=4):
         super().__init__()
-        self.layers = torch.nn.ModuleList([torch.nn.Linear(nhid, nhid, bias=False) for _ in range(nlayers)])
+        self.layers = torch.nn.ModuleList([torch.nn.Linear(nhid, nhid) for _ in range(nlayers)])
 
     def forward(self, x):
         for layer in self.layers:
