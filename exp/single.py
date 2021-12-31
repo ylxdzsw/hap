@@ -22,4 +22,5 @@ for i, node in enumerate(nodes):
 
 import spmd
 
-print(spmd.spmd(nodes, {}, {}))
+from pprint import pprint
+pprint(spmd.spmd(nodes, {}, {}))

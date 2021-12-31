@@ -28,12 +28,7 @@ cpython::py_module_initializer!(spmd, |py, m| {
     }
 
     #[allow(clippy::manual_strip)]
-    m.add(py, "example", cpython::py_fn!(py, example() -> PyResult<PyTuple> {
-        Ok((2, ).to_py_object(py))
-    }))?;
-
-    #[allow(clippy::manual_strip)]
-    m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyObject, hints: PyDict) -> PyResult<PyTuple> {
+    m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyObject, hints: PyDict) -> PyResult<PyList> {
         let graph = build_graph(py, &py_nodes, &profiler, hints)?;
         dump_graph(py, &py_nodes, &graph);
         let computation_profiler = profiler::FlopsProfiler { device_flops: 6505771594034, n_devices: 4 };
@@ -44,8 +39,7 @@ cpython::py_module_initializer!(spmd, |py, m| {
             all_to_all:     23206060575,
         };
         let profiler = (computation_profiler, communication_profiler);
-        dp3::dp3(&graph, &profiler);
-        Ok((2, ).to_py_object(py))
+        dp3::dp3(py, &graph, &profiler)
     }))?;
 
     Ok(())

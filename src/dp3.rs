@@ -1,6 +1,6 @@
 use std::{rc::Rc, collections::{BTreeMap, BTreeSet}, ops::Index, cell::RefCell};
 
-use cpython::{ToPyObject, PyObject, Python, PyList, PyDict, PyResult, PythonObject};
+use cpython::{ToPyObject, PyObject, Python, PyList, PyDict, PyResult, PythonObject, ObjectProtocol};
 use oh_my_rust::*;
 
 use crate::{graph::{NodeIndex, TensorIndex, Form, Node, Signature, SignatureIndex, Tensor, Collective}, SVec, smallvec, CTRLC_RECEIVED, profiler::Profiler};
@@ -251,7 +251,7 @@ impl<'g> Graph<'g> {
     }
 }
 
-pub fn dp3(graph: &crate::graph::Graph, profiler: &dyn Profiler) {
+pub fn dp3(py: Python, graph: &crate::graph::Graph, profiler: &dyn Profiler) -> PyResult<PyList> {
     let g = Graph::new(graph, profiler);
     let n_cut = g.n_cuts();
 
@@ -281,7 +281,10 @@ pub fn dp3(graph: &crate::graph::Graph, profiler: &dyn Profiler) {
             break
         }
     }
-    dump_path(&g, best_path.unwrap())
+
+    dump_path(&g, best_path.unwrap());
+
+    export_path(py, &g, best_path.unwrap())
 }
 
 // Pareto[cut][state_tensors] = list of pareto stages leads to it
@@ -442,6 +445,37 @@ fn export_path(py: Python, g: &Graph, stage: &Stage) -> PyResult<PyList> {
         })?;
         py_communications.append(py, py_communication.into_object())
     }
+
+    for computation in &stage.computations {
+        let node = &g[computation.node];
+        let signature = &node.signatures[computation.signature.0];
+        let mut py_computation = PyDict::new(py);
+        py_computation.set_item(py, "origin_id", node.origin_id)?;
+        py_computation.set_item(py, "output_forms", {
+            let mut py_output_forms = PyList::new(py, &[]);
+            for output_form in signature.output_forms.iter() {
+                py_output_forms.append(py, output_form.to_string().into_py_object(py).into_object())
+            }
+            py_output_forms
+        })?;
+        py_computation.set_item(py, "companions", {
+            let mut py_companions = PyList::new(py, &[]);
+            for companion in node.companions.iter() {
+                py_companions.append(py, companion.into_py_object(py).into_object())
+            }
+            py_companions
+        })?;
+        py_computation.set_item(py, "input_forms", {
+            let mut py_input_forms = PyDict::new(py);
+            for (input_name, input_form) in node.input_names.iter().zip(signature.input_forms.iter()) {
+                py_input_forms.set_item(py, input_name, input_form.to_string())?;
+            }
+            py_input_forms
+        })?;
+        py_computations.append(py, py_computation.into_object())
+    }
+
+    py_stages.append(py, (py_communications, py_computations).into_py_object(py).into_object());
 
     Ok(py_stages)
 }
