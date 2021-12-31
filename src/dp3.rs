@@ -433,14 +433,14 @@ fn export_path(py: Python, g: &Graph, stage: &Stage) -> PyResult<PyList> {
         })?;
         py_communication.set_item(py, "old_form", communication.old_form.to_string())?;
         py_communication.set_item(py, "new_form", communication.new_form.to_string())?;
-        py_communication.set_item(py, "collective_names", {
-            let mut py_collective_names = PyList::new(py, &[]);
+        py_communication.set_item(py, "collectives", {
+            let mut py_collectives = PyList::new(py, &[]);
             for collective in communication.collectives() {
-                py_collective_names.append(py, collective.to_string().into_py_object(py).into_object())
+                py_collectives.append(py, collective.to_string().into_py_object(py).into_object())
             }
-            py_collective_names
+            py_collectives
         })?;
-
+        py_communications.append(py, py_communication.into_object())
     }
 
     Ok(py_stages)

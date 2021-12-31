@@ -64,12 +64,12 @@ pub struct BandwidthProfiler {
 impl BandwidthProfiler {
     fn get_time(&self, size: u64, op: Collective) -> f64 {
         match op {
-            Collective::AllGather => (size as f64) / (self.all_gather as f64),
+            Collective::AllGather(_) => (size as f64) / (self.all_gather as f64),
             Collective::AllReduce => (size as f64) / (self.all_reduce as f64),
-            Collective::ReduceScatter => (size as f64) / (self.reduce_scatter as f64),
-            Collective::AllToAll => (size as f64) / (self.all_to_all as f64),
+            Collective::ReduceScatter(_) => (size as f64) / (self.reduce_scatter as f64),
+            Collective::AllToAll(..) => (size as f64) / (self.all_to_all as f64),
             Collective::Replicate => 0.,
-            Collective::DynamicSlice => 0.,
+            Collective::DynamicSlice(_) => 0.,
         }
     }
 }

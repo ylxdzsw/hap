@@ -68,13 +68,13 @@ impl Form {
     pub fn collective_reform(self, new_form: Form) -> Option<SVec<Collective, 2>> {
         match (self, new_form) {
             (a, b) if a == b => Some(smallvec![]),
-            (Form::Full, Form::Gather(_)) => Some(smallvec![Collective::DynamicSlice]),
-            (Form::Gather(_), Form::Full) => Some(smallvec![Collective::AllGather]),
-            (Form::Gather(_), Form::Gather(_)) => Some(smallvec![Collective::AllToAll]), // this must not be the same
+            (Form::Full, Form::Gather(dim)) => Some(smallvec![Collective::DynamicSlice(dim)]),
+            (Form::Gather(dim), Form::Full) => Some(smallvec![Collective::AllGather(dim)]),
+            (Form::Gather(cat_dim), Form::Gather(split_dim)) => Some(smallvec![Collective::AllToAll(split_dim, cat_dim)]), // this must not be the same
             (Form::Reduce, Form::Full) => Some(smallvec![Collective::AllReduce]),
-            (Form::Reduce, Form::Gather(_)) => Some(smallvec![Collective::ReduceScatter]),
+            (Form::Reduce, Form::Gather(dim)) => Some(smallvec![Collective::ReduceScatter(dim)]),
             (Form::Replicate, Form::Full) => Some(smallvec![Collective::Replicate]),
-            (Form::Replicate, Form::Gather(_)) => Some(smallvec![Collective::Replicate, Collective::DynamicSlice]),
+            (Form::Replicate, Form::Gather(dim)) => Some(smallvec![Collective::Replicate, Collective::DynamicSlice(dim)]),
             _ => None
         }
     }
@@ -121,18 +121,24 @@ crate::new_index_type!(pub, TensorIndex);
 crate::new_index_type!(pub, SignatureIndex);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(u8)]
-pub enum Collective { AllGather, AllReduce, ReduceScatter, AllToAll, Replicate, DynamicSlice }
+pub enum Collective {
+    AllGather(u8),
+    AllReduce,
+    ReduceScatter(u8),
+    AllToAll(u8, u8), // split_dim, cat_dim
+    Replicate,
+    DynamicSlice(u8)
+}
 
 impl Collective {
     pub fn conjugate(self) -> Option<Self> {
         match self {
-            Collective::AllGather => Some(Collective::ReduceScatter),
+            Collective::AllGather(dim) => Some(Collective::ReduceScatter(dim)),
             Collective::AllReduce => Some(Collective::AllReduce),
-            Collective::ReduceScatter => Some(Collective::AllGather),
-            Collective::AllToAll => Some(Collective::AllToAll),
+            Collective::ReduceScatter(dim) => Some(Collective::AllGather(dim)),
+            Collective::AllToAll(split_dim, cat_dim) => Some(Collective::AllToAll(cat_dim, split_dim)),
             Collective::Replicate => Some(Collective::AllReduce),
-            Collective::DynamicSlice => None,
+            Collective::DynamicSlice(_) => None,
         }
     }
 }
@@ -140,12 +146,12 @@ impl Collective {
 impl Display for Collective {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Collective::AllGather => write!(f, "all_gather"),
+            Collective::AllGather(dim) => write!(f, "all_gather_{}", dim),
             Collective::AllReduce => write!(f, "all_reduce"),
-            Collective::ReduceScatter => write!(f, "reduce_scatter"),
-            Collective::AllToAll => write!(f, "all_to_all"),
+            Collective::ReduceScatter(dim) => write!(f, "reduce_scatter_{}", dim),
+            Collective::AllToAll(split_dim, cat_dim) => write!(f, "all_to_all_{}_{}", split_dim, cat_dim),
             Collective::Replicate => write!(f, "replicate"),
-            Collective::DynamicSlice => write!(f, "dynamic_slice"),
+            Collective::DynamicSlice(dim) => write!(f, "dynamic_slice_{}", dim),
         }
     }
 }

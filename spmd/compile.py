@@ -52,21 +52,13 @@ def compile(
         origin_node_id: int,
         old_form: str,
         new_form: str,
-        collective_names: list[str],
-        collective_args: list[tuple]
+        collectives: list[str],
     ):
         origin_name = nodes[origin_node_id].name
         node = tensor_dict[(origin_name, old_form)]
-        for collective_name, collective_arg in zip(collective_names, collective_args):
-            collective_op = ({
-                'all_gather': collectives.all_gather,
-                'all_reduce': collectives.all_reduce,
-                'reduce_scatter': collectives.reduce_scatter,
-                'all_to_all': collectives.all_to_all,
-                'dynamic_slice': collectives.dynamic_slice,
-                'replicate': collectives.replicate
-            })[collective_name]
-            node = new_graph.call_function(collective_op, (node, *collective_arg))
+        for collective_str in collectives:
+            collective_op, collective_args = parse_collective_str(collective_str)
+            node = new_graph.call_function(collective_op, (node, *collective_args))
         tensor_dict[(origin_name, new_form)] = node
 
     module.default_stream = torch.cuda.default_stream(rank)
@@ -91,3 +83,20 @@ def compile(
         if len(communications) != 0:
             ...
 
+def parse_collective_str(collective_str):
+    collective_op_dict = {
+        'all_gather': collectives.all_gather,
+        'all_reduce': collectives.all_reduce,
+        'reduce_scatter': collectives.reduce_scatter,
+        'all_to_all': collectives.all_to_all,
+        'dynamic_slice': collectives.dynamic_slice,
+        'replicate': collectives.replicate
+    }
+    re_str = "^({})(_\\d+)?(_\\d+)?$".format('|'.join(collective_op_dict.keys()))
+
+    import re
+    m = re.search(re_str, collective_str)
+
+    collective_op = collective_op_dict[m.group(1)]
+    collective_args = *(int(v[1:]) for v in m.groups()[1:]),
+    return collective_op, collective_args
