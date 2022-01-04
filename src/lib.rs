@@ -30,7 +30,7 @@ cpython::py_module_initializer!(spmd, |py, m| {
     #[allow(clippy::manual_strip)]
     m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyObject, hints: PyDict) -> PyResult<PyList> {
         let graph = build_graph(py, &py_nodes, &profiler, hints)?;
-        dump_graph(py, &py_nodes, &graph);
+        // dump_graph(py, &py_nodes, &graph);
         let computation_profiler = profiler::FlopsProfiler { device_flops: 6505771594034, n_devices: 4 };
         let communication_profiler = profiler::BandwidthProfiler {
             all_gather:     7678214035,
@@ -92,8 +92,8 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
                 0
             };
 
-            input_node.companions.resize(input_index + 1, 0);
-            input_node.companions[input_index] = node.origin_id;
+            input_node.companions.resize(input_index + 1, None);
+            input_node.companions[input_index] = Some(node.origin_id);
 
             node.outputs = smallvec![input_node.outputs[input_index]];
             nodes.push(node);

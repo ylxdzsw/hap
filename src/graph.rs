@@ -13,7 +13,7 @@ pub struct Node {
     pub signatures: Vec<Signature>,
 
     pub input_names: SVec<String>, // original node name of the inputs
-    pub companions: SVec<usize>, // the origin_id of adaptive nodes in the output order
+    pub companions: SVec<Option<usize>>, // the origin_id of adaptive nodes in the output order
 
     pub flops: u64,
     pub name: String,

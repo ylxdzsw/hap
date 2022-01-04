@@ -257,7 +257,7 @@ def annotate_identity(node: torch.fx.node.Node, input_name: str):
     node.meta['output_shape'] = input_node.meta['output_shape']
     node.meta['signatures'] = [ ({ input_name: f"gather_{i}" }, f"gather_{i}" ) for i in range(output_dims(input_node)) ]
     node.meta['signatures'].append(({ input_name: 'reduce' }, 'reduce'))
-    node.meta['is_adaptive'] = True
+    # node.meta['is_adaptive'] = True # TODO: the meaning of is_adaptive is too overloaded.
     node.meta['flops'] = math.prod(input_node.meta['output_shape'])
 
 @annotation_rule(torch.Tensor.view)

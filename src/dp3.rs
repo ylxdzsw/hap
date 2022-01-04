@@ -89,13 +89,7 @@ impl Cut {
             }
         }
 
-        state_tensors.push(vec![]); // a trailing cut that cuts after the last node
-
-        for (i, state_tensor) in state_tensors.iter().enumerate() {
-            info!("cut {} has {} tensors, totaling {} states",
-                i, state_tensor.len(), state_tensor.iter().map(|&x| g[x].consumer_forms.len()).product::<usize>()
-            )
-        }
+        state_tensors.push(vec![]); // a trailing cut that cuts after the last node. Not strictly needed as the last node is the output node, which has no outputs
 
         state_tensors.into_iter().enumerate().map(|(i, x)| {
             Cut::new(NodeIndex(i), x)
@@ -159,21 +153,22 @@ impl State {
         let next_node = &g[g[self.cut].next_node];
         let mut result = vec![];
 
-        for (signature_id, signature) in next_node.signatures.iter().enumerate() {
+        'sig: for (signature_id, signature) in next_node.signatures.iter().enumerate() {
             let mut communications = SVec::default();
 
             for (&input_tensor, &input_tensor_form) in next_node.inputs.iter().zip(signature.input_forms.iter()) {
                 let i = g[self.cut].state_tensors_reverse_map.get(&input_tensor).expect("input tensor not in state tensors");
                 let available_forms = self.available_forms[*i];
+
                 if available_forms.contains(input_tensor_form) {
                     continue
                 }
                 if available_forms.len() > 1 {
-                    continue // too many forms
+                    continue 'sig // too many forms
                 }
                 let available_form = available_forms.unwrap();
                 if available_form.collective_reform(input_tensor_form).is_none() {
-                    continue // cannot reform like this
+                    continue 'sig // cannot reform like this
                 }
                 communications.push(Communication { tensor: input_tensor, old_form: available_form, new_form: input_tensor_form })
             }
@@ -259,8 +254,13 @@ pub fn dp3(py: Python, graph: &crate::graph::Graph, profiler: &dyn Profiler) -> 
     pareto[0].insert(vec![], vec![Rc::new(Stage::default())]);
 
     #[allow(clippy::needless_range_loop)]
-    for cut_index in 0..n_cut-2 {
-        info!("expanding on cut {} with {} states and {} paths", cut_index, pareto[cut_index].len(), pareto[cut_index].values().map(|x| x.len()).sum::<usize>());
+    for cut_index in 0..n_cut-1 {
+        info!("expanding on cut {} with {} tensors, {} states, and {} paths",
+            cut_index,
+            g[CutIndex(cut_index)].state_tensors.len(),
+            pareto[cut_index].len(),
+            pareto[cut_index].values().map(|x| x.len()).sum::<usize>()
+        );
         for (available_forms, prev_stages) in std::mem::take(&mut pareto[cut_index]) { // take out for eager free memory as well as to release reference to pareto
             let state = State { cut: cut_index.into(), available_forms };
             explore_next_stage(&g, &mut pareto, state, &prev_stages);
@@ -269,16 +269,15 @@ pub fn dp3(py: Python, graph: &crate::graph::Graph, profiler: &dyn Profiler) -> 
 
     let mut best_time = f64::MAX;
     let mut best_path = None;
-    for (available_forms, stages) in pareto[n_cut-2].iter() {
-        if available_forms[0].contains(Form::Reduce) {
-            for stage in stages {
-                let time = stage.cost.acc_time + stage.cost.debt;
-                if best_path.is_none() || time < best_time {
-                    best_time = time;
-                    best_path = Some(stage)
-                }
-            }
-            break
+    assert_eq!(pareto[n_cut-1].len(), 1);
+    let (available_forms, stages) = pareto[n_cut-1].iter().take(1).next().unwrap();
+    assert!(available_forms.is_empty());
+
+    for stage in stages {
+        let time = stage.cost.acc_time + stage.cost.debt;
+        if best_path.is_none() || time < best_time {
+            best_time = time;
+            best_path = Some(stage)
         }
     }
 
@@ -428,10 +427,10 @@ fn export_path(py: Python, g: &Graph, stage: &Stage) -> PyResult<PyList> {
         py_communication.set_item(py, "origin_node_id", {
             let producer_node = &g[g[communication.tensor].producer];
             if producer_node.companions.is_empty() {
-                producer_node.origin_id
+                producer_node.origin_id.into_py_object(py).into_object()
             } else {
                 let i = producer_node.outputs.iter().position(|&x| x == communication.tensor).unwrap();
-                producer_node.companions[i]
+                producer_node.companions[i].into_py_object(py).into_object()
             }
         })?;
         py_communication.set_item(py, "old_form", communication.old_form.to_string())?;

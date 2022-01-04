@@ -62,12 +62,13 @@ pub struct BandwidthProfiler {
 }
 
 impl BandwidthProfiler {
-    fn get_time(&self, size: u64, op: Collective) -> f64 {
+    fn get_collective_time(&self, size: u64, op: Collective) -> f64 {
+        const LATENCY: f64 = 1e-4; // 0.1ms latency for any real communication
         match op {
-            Collective::AllGather(_) => (size as f64) / (self.all_gather as f64),
-            Collective::AllReduce => (size as f64) / (self.all_reduce as f64),
-            Collective::ReduceScatter(_) => (size as f64) / (self.reduce_scatter as f64),
-            Collective::AllToAll(..) => (size as f64) / (self.all_to_all as f64),
+            Collective::AllGather(_) => (size as f64) / (self.all_gather as f64) + LATENCY,
+            Collective::AllReduce => (size as f64) / (self.all_reduce as f64) + LATENCY,
+            Collective::ReduceScatter(_) => (size as f64) / (self.reduce_scatter as f64) + LATENCY,
+            Collective::AllToAll(..) => (size as f64) / (self.all_to_all as f64) + LATENCY,
             Collective::Replicate => 0.,
             Collective::DynamicSlice(_) => 0.,
         }
@@ -77,14 +78,14 @@ impl BandwidthProfiler {
 impl CommunicationProfiler for BandwidthProfiler {
     fn get_forward_time(&self, size: u64, old_form: Form, new_form: Form) -> f64 {
         old_form.collective_reform(new_form).expect("cannot reform").into_iter()
-            .map(|collective| self.get_time(size, collective))
+            .map(|collective| self.get_collective_time(size, collective))
             .sum::<f64>()
     }
 
     fn get_backward_time(&self, size: u64, old_form: Form, new_form: Form) -> f64 {
         old_form.collective_reform(new_form).expect("cannot reform").into_iter()
             .flat_map(Collective::conjugate)
-            .map(|collective| self.get_time(size, collective))
+            .map(|collective| self.get_collective_time(size, collective))
             .sum::<f64>()
     }
 }
