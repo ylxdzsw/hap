@@ -31,12 +31,12 @@ cpython::py_module_initializer!(spmd, |py, m| {
     m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyObject, hints: PyDict) -> PyResult<PyList> {
         let graph = build_graph(py, &py_nodes, &profiler, hints)?;
         // dump_graph(py, &py_nodes, &graph);
-        let computation_profiler = profiler::FlopsProfiler { device_flops: 6505771594034, n_devices: 4 };
+        let computation_profiler = profiler::FlopsProfiler { device_flops: 6423710375980, n_devices: 4 };
         let communication_profiler = profiler::BandwidthProfiler {
-            all_gather:     7678214035,
-            all_reduce:     4572389694,
-            reduce_scatter: 7919165850,
-            all_to_all:     23206060575,
+            all_gather:     7703543732,
+            all_reduce:     4457607154,
+            reduce_scatter: 7724567251,
+            all_to_all:     21389930375,
         };
         let profiler = (computation_profiler, communication_profiler);
         dp3::dp3(py, &graph, &profiler)
@@ -146,7 +146,12 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
                 };
                 node.signatures.push(reduce_signature);
             }
-            OpKind::Placeholder => { // the placeholder only has a Full signature. We assume that each worker load the full batch then performing dynamic slicing
+            OpKind::Placeholder => { // the placeholder can be either full or gather_0
+                let dp_signature = Signature {
+                    output_forms: smallvec![Form::Gather(0)],
+                    ..Default::default()
+                };
+                node.signatures.push(dp_signature);
                 let full_signature = Signature {
                     output_forms: smallvec![Form::Full],
                     ..Default::default()

@@ -4,10 +4,12 @@ import torch
 import torch.fx
 from torch.profiler import profile, record_function, ProfilerActivity
 
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 from models import MLP, MLP2, MoE, Transformer
-from annotator import annotate
-from compiler import compile
 from utils import *
+
+world_size = 4
 
 def run(rank, model_str):
     import torch.distributed as dist
@@ -16,21 +18,20 @@ def run(rank, model_str):
     torch.manual_seed(0)
     # torch.use_deterministic_algorithms(True)
 
-    if model_str == 'mlp':
-        model = MLP(nhid=config.emsize, nlayers=config.nlayers)
-    if model_str == 'mlp2':
-        model = MLP2(nhid=config.emsize, nlayers=config.nlayers)
-    if model_str == 'moe':
-        model = MoE(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, n_expert=config.n_expert, capacity=config.capacity, nlayers=config.nlayers)
-    if model_str == 'transformer':
-        model = Transformer(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, nlayers=config.nlayers)
+    if sys.argv[1] == 'mlp':
+        model = symbolic_trace(MLP(nhid=config.emsize, nlayers=config.nlayers))
+    if sys.argv[1] == 'mlp2':
+        model = symbolic_trace(MLP2(nhid=config.emsize, nlayers=config.nlayers))
+    if sys.argv[1] == 'moe':
+        model = symbolic_trace(MoE(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, n_expert=config.n_expert, capacity=config.capacity, nlayers=config.nlayers), inline_functions=[torch.nn.functional.multi_head_attention_forward])
+    if sys.argv[1] == 'transformer':
+        model = symbolic_trace(Transformer(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, nlayers=config.nlayers), inline_functions=[torch.nn.functional.multi_head_attention_forward])
 
-    model = symbolic_trace(model, inline_functions=[torch.nn.functional.multi_head_attention_forward]).cuda(rank)
-    annotate(model, { 'x': (config.batch_size, config.seqlen, config.emsize) })
-    compile(model, load(f"strategy_{model_str}"), rank, config.world_size)
+    model = DDP(model.cuda(rank), device_ids=[rank])
 
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
     test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(rank) / 6
+    test_input = test_input.chunk(world_size, 0)[rank]
 
     for iter in range(10):
         with measure_time(f"iteration {iter}") as wall_time:
@@ -70,19 +71,19 @@ def run(rank, model_str):
         prof.export_chrome_trace("trace.json")
 
 if __name__ == '__main__':
-    if torch.cuda.device_count() != config.world_size:
+    if torch.cuda.device_count() != world_size:
         print("forget to set CUDA_VISIBLE_DEVICES")
         raise SystemExit
 
     import os
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '39281'
-    os.environ['WORLD_SIZE'] = str(config.world_size)
+    os.environ['WORLD_SIZE'] = str(world_size)
 
     import torch.multiprocessing as mp
     mp.set_start_method('spawn')
 
-    for rank in range(config.world_size):
+    for rank in range(world_size):
         mp.Process(target=run, args=(rank, sys.argv[1])).start()
 
     for p in mp.active_children():

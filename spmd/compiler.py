@@ -46,6 +46,13 @@ def compile(
         companions: list[int],
     ):
         raw_node = nodes[origin_id]
+
+        if raw_node.op == 'get_attr': # special case parameters: only load them on first duplica
+            assert len(companions) == 0
+            if tensor_dict is tensor_dict_2:
+                tensor_dict_2[(raw_node.name, output_forms[0])] = tensor_dict_1[(raw_node.name, output_forms[0])]
+                return
+
         new_node = new_graph.node_copy(raw_node, lambda n: tensor_dict[(n.name, input_forms[n.name])])
         if len(companions) > 0:
             tensor_dict[(raw_node.name, '')] = new_node
@@ -66,12 +73,18 @@ def compile(
         new_form: str,
         collectives: list[str],
     ):
-        origin_name = nodes[origin_node_id].name
-        node = tensor_dict[(origin_name, old_form)]
+        raw_node = nodes[origin_node_id]
+
+        if raw_node.op == 'get_attr': # special case parameters: only communicate on the first duplica. TODO: reflect this optimization on strategy making phase
+            if tensor_dict is tensor_dict_2:
+                tensor_dict_2[(raw_node.name, new_form)] = tensor_dict_1[(raw_node.name, new_form)]
+                return
+
+        node = tensor_dict[(raw_node.name, old_form)]
         for collective_str in collectives:
             collective_op, collective_args = parse_collective_str(collective_str)
             node = new_graph.call_function(collective_op, (node, *collective_args))
-        tensor_dict[(origin_name, new_form)] = node
+        tensor_dict[(raw_node.name, new_form)] = node
 
     def barrier():
         ev1 = new_graph.call_method("record_event", (stream_1,))
@@ -87,11 +100,16 @@ def compile(
         new_graph.call_method("wait_stream", (stream_1, default_stream))
         new_graph.call_method("wait_stream", (stream_2, default_stream))
 
-    def gen_placeholder(raw_node):
+    def gen_placeholder(raw_node, form):
         # not needed assuming that placeholders are in the first stage
         # default_wait_all()
         # new_graph.call_function(torch.cuda.set_stream, (default_stream,))
         new_input = new_graph.node_copy(raw_node)
+        if form == "gather_0":
+            new_input = new_graph.call_function(torch.chunk, (new_input, world_size, 0))[rank]
+        else:
+            assert form == "full"
+
         new_input_chunks = new_graph.call_function(torch.chunk, (new_input, 2, 0))
         tensor_dict_1[(raw_node.name, 'full')] = new_graph.call_function(operator.getitem, (new_input_chunks, 0))
         tensor_dict_2[(raw_node.name, 'full')] = new_graph.call_function(operator.getitem, (new_input_chunks, 1))
@@ -127,7 +145,7 @@ def compile(
         for computation in computations:
             raw_node = nodes[computation['origin_id']]
             if raw_node.op == 'placeholder':
-                gen_placeholder(raw_node)
+                gen_placeholder(raw_node, computation["output_forms"][0])
             if raw_node.op == 'output':
                 assert output is None
                 output = raw_node

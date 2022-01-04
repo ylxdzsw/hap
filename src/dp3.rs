@@ -298,21 +298,18 @@ fn explore_next_stage(g: &Graph, pareto: &mut Pareto, state: State, prev_stages:
         let forward_comp_time = computations.iter().map(|comp| g.profiler.get_computation_forward_time(&g[comp.node], comp.signature)).sum::<f64>();
         let backward_comp_time = computations.iter().map(|comp| g.profiler.get_computation_backward_time(&g[comp.node], comp.signature)).sum::<f64>();
         let forward_comm_time = communications.iter().map(|comm| g.profiler.get_communication_forward_time(g[comm.tensor].size, comm.old_form, comm.new_form)).sum::<f64>();
-        let backward_comm_time = communications.iter().map(|comm| {
-            let mut time = g.profiler.get_communication_backward_time(g[comm.tensor].size, comm.old_form, comm.new_form);
-            if comm.old_form == Form::Replicate {
-                time /= 2. // the all-reduce operation for parameters on the backward pass are not blocking, so we give them less weight
-            }
-            time
-        }).sum::<f64>();
+        let backward_comm_time = communications.iter().map(|comm| g.profiler.get_communication_backward_time(g[comm.tensor].size, comm.old_form, comm.new_form)).sum::<f64>();
 
         for prev_stage in prev_stages.iter().cloned() {
-            let new_acc_time = prev_stage.cost.acc_time +
-                /*forward*/ prev_stage.cost.debt.max(forward_comm_time) + forward_comp_time.max(forward_comm_time) +
-                /*backward*/ (2. * prev_stage.cost.debt).max(backward_comm_time) + backward_comp_time.max(backward_comm_time);
+            // let new_acc_time = prev_stage.cost.acc_time +
+            //     /*forward*/ prev_stage.cost.debt.max(forward_comm_time) + forward_comp_time.max(forward_comm_time) +
+            //     /*backward*/ (2. * prev_stage.cost.debt).max(backward_comm_time) + backward_comp_time.max(backward_comm_time);
             // let new_acc_time = prev_stage.cost.acc_time +
             //     /*forward*/ prev_stage.cost.debt + forward_comm_time + forward_comp_time + forward_comm_time +
             //     /*backward*/ (2. * prev_stage.cost.debt) + backward_comm_time + backward_comp_time + backward_comm_time;
+            let new_acc_time = prev_stage.cost.acc_time +
+            /*forward*/ prev_stage.cost.debt.max(forward_comm_time) + forward_comp_time.max(forward_comm_time) +
+            /*backward*/ 2. * prev_stage.cost.debt + backward_comm_time + backward_comp_time + backward_comm_time;
 
             let new_debt = forward_comp_time;
             let new_stage = Stage {
