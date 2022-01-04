@@ -1,18 +1,16 @@
+import config
+
 import os
 import sys
 import time
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.optim as optim
-import torch.multiprocessing as mp
 
 import fmoe
 
-from torch.nn.parallel import DistributedDataParallel as DDP
-
 rank=int(sys.argv[1])
-world_size=4
+world_size=config.world_size
 
 os.environ['MASTER_ADDR'] = '127.0.0.1'
 os.environ['MASTER_PORT'] = '12355'
@@ -23,20 +21,20 @@ class SwitchTransformerEncoderLayer(nn.Module):
     def __init__(self):
         super(SwitchTransformerEncoderLayer, self).__init__()
 
-        self.self_atten = torch.nn.MultiheadAttention(1024, 4, dropout=0.1)
+        self.self_atten = torch.nn.MultiheadAttention(config.emsize, 4, dropout=config.dropout)
 
         self.moe = fmoe.FMoETransformerMLP(
-            num_expert=8, # this is the number of experts on *each* worker
-            d_model=1024,
-            d_hidden=4096,
+            num_expert=config.n_expert // config.world_size, # this is the number of experts on *each* worker
+            d_model=config.emsize,
+            d_hidden=config.nhid,
             expert_rank=rank,
             top_k=1,
             world_size=world_size,
         )
 
-        self.norm1 = torch.nn.LayerNorm(1024, eps=1e-5)
-        self.norm2 = torch.nn.LayerNorm(1024, eps=1e-5)
-        self.dropout = torch.nn.Dropout(0.1)
+        self.norm1 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
+        self.norm2 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
+        self.dropout = torch.nn.Dropout(config.dropout)
 
     def forward(self, x):
         x = self.norm1(x + self._sa_block(x))
@@ -51,25 +49,25 @@ class NaiveSwitchTransformerEncoderLayer(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.self_atten = torch.nn.MultiheadAttention(1024, 4, dropout=0.1)
+        self.self_atten = torch.nn.MultiheadAttention(config.emsize, 4, dropout=config.dropout)
 
         self.moe = fmoe.FMoE(
-            num_expert=8, # this is the number of experts on *each* worker
-            d_model=1024,
+            num_expert=config.n_expert // config.world_size, # this is the number of experts on *each* worker
+            d_model=config.emsize,
             top_k=1,
             world_size=world_size,
 
             expert=lambda d: torch.nn.Sequential(
-                LogShape(),
-                torch.nn.Linear(d, 4096),
+                # LogShape(),
+                torch.nn.Linear(d, config.nhid),
                 torch.nn.ReLU(),
-                torch.nn.Linear(4096, d),
+                torch.nn.Linear(config.nhid, d),
             ),
         )
 
-        self.norm1 = torch.nn.LayerNorm(1024, eps=1e-5)
-        self.norm2 = torch.nn.LayerNorm(1024, eps=1e-5)
-        self.dropout = torch.nn.Dropout(0.1)
+        self.norm1 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
+        self.norm2 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
+        self.dropout = torch.nn.Dropout(config.dropout)
 
     def forward(self, x):
         x = self.norm1(x + self._sa_block(x))
@@ -92,11 +90,11 @@ class MoE(torch.nn.Module):
         super().__init__()
 
         self.layers = torch.nn.ModuleList([
-            torch.nn.TransformerEncoderLayer(1024, 4, 4096, 0.1)
+            torch.nn.TransformerEncoderLayer(config.emsize, 4, config.nhid, config.dropout)
             if i % 2 == 0 else
-            # SwitchTransformerEncoderLayer()
-            NaiveSwitchTransformerEncoderLayer()
-            for i in range(4)
+            SwitchTransformerEncoderLayer()
+            # NaiveSwitchTransformerEncoderLayer()
+            for i in range(config.nlayers)
         ])
 
     def forward(self, x):
@@ -106,10 +104,9 @@ class MoE(torch.nn.Module):
 
 model = MoE().to(0)
 model = fmoe.DistributedGroupedDataParallel(model)
-# ddp_model = DDP(model, device_ids=[0])
 
 optimizer = torch.optim.SGD(model.parameters(), lr=1e-8)
-rand_input = torch.rand(4, 256, 1024).to(0) / 6
+rand_input = torch.rand(config.batch_size // config.world_size, config.seqlen, config.emsize).to(0) / 6
 
 for i in range(10):
     start_time = time.time()

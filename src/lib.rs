@@ -146,7 +146,7 @@ fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict
                 };
                 node.signatures.push(reduce_signature);
             }
-            OpKind::Placeholder => { // the placeholder can be either full or gather_0
+            OpKind::Placeholder => { // the placeholder can be either full or gather_0. The compiler will add the splitting operation and ensure it is before the duplica splitting.
                 let dp_signature = Signature {
                     output_forms: smallvec![Form::Gather(0)],
                     ..Default::default()

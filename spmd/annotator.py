@@ -460,3 +460,55 @@ def annotate_einsum(node: torch.fx.node.Node):
 
     raise "TODO"
 
+@annotation_rule(torch.nn.functional.multi_head_attention_forward)
+def annotate_attention(node: torch.fx.node.Node):
+    query = node.meta['arg_dict']['query']
+    key = node.meta['arg_dict']['key']
+    value = node.meta['arg_dict']['value']
+
+    in_proj_weight = node.meta['arg_dict']['in_proj_weight']
+    in_proj_bias = node.meta['arg_dict']['in_proj_bias']
+
+    assert node.meta['arg_dict']['bias_k'] is None
+    assert node.meta['arg_dict']['bias_v'] is None
+
+    out_proj_weight = node.meta['arg_dict']['out_proj_weight']
+    out_proj_bias = node.meta['arg_dict']['out_proj_bias']
+
+    assert node.meta['arg_dict']['key_padding_mask'] is None
+    assert node.meta['arg_dict']['attn_mask'] is None
+
+    assert node.meta['arg_dict']['use_separate_proj_weight'] is False
+
+    assert node.meta['arg_dict']['static_k'] is None
+    assert node.meta['arg_dict']['static_v'] is None
+
+    L, N, E = query.meta['output_shape']
+    S, _N, _E = key.meta['output_shape']
+
+    node.meta['output_shape'] = (L, N, E), (N, L, S)
+
+    node.meta['flops'] = 3 * L * N * E * S + 5 * L * S * N + 3 * L * N * E * S
+
+    node.meta['output_is_tuple'] = True
+
+    node.meta['signatures'] = [
+        ({ # DP: gather on N dimension
+            'query': 'gather_1',
+            'key': 'gather_1',
+            'value': 'gather_1',
+            'in_proj_weight': 'full',
+            'in_proj_bias': 'full',
+            'out_proj_weight': 'full',
+            'out_proj_bias': 'full',
+        }, ('gather_1', 'gather_0')),
+        ({ # The inequivalent Megatron style transform that causes mismatch on the assignment of weights
+            'query': 'gather_2',
+            'key': 'gather_2',
+            'value': 'gather_2',
+            'in_proj_weight': 'gather_0',
+            'in_proj_bias': 'gather_0',
+            'out_proj_weight': 'gather_1',
+            'out_proj_bias': 'full', # !!! very wrong
+        }, ('reduce', 'reduce')) # not sure about the weights, but it is not used anyway
+    ]

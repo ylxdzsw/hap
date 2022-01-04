@@ -25,7 +25,7 @@ def run(rank, model_str):
     if model_str == 'transformer':
         model = Transformer(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, nlayers=config.nlayers)
 
-    model = symbolic_trace(model, inline_functions=[torch.nn.functional.multi_head_attention_forward]).cuda(rank)
+    model = symbolic_trace(model).cuda(rank)
     annotate(model, { 'x': (config.batch_size, config.seqlen, config.emsize) })
     compile(model, load(f"strategy_{model_str}"), rank, config.world_size)
 

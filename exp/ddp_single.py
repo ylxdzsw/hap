@@ -19,13 +19,13 @@ def run(rank, model_str):
     # torch.use_deterministic_algorithms(True)
 
     if sys.argv[1] == 'mlp':
-        model = symbolic_trace(MLP(nhid=config.emsize, nlayers=config.nlayers))
+        model = MLP(nhid=config.emsize, nlayers=config.nlayers)
     if sys.argv[1] == 'mlp2':
-        model = symbolic_trace(MLP2(nhid=config.emsize, nlayers=config.nlayers))
+        model = MLP2(nhid=config.emsize, nlayers=config.nlayers)
     if sys.argv[1] == 'moe':
-        model = symbolic_trace(MoE(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, n_expert=config.n_expert, capacity=config.capacity, nlayers=config.nlayers), inline_functions=[torch.nn.functional.multi_head_attention_forward])
+        model = MoE(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, n_expert=config.n_expert, capacity=config.capacity, nlayers=config.nlayers)
     if sys.argv[1] == 'transformer':
-        model = symbolic_trace(Transformer(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, nlayers=config.nlayers), inline_functions=[torch.nn.functional.multi_head_attention_forward])
+        model = Transformer(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, nlayers=config.nlayers)
 
     model = DDP(model.cuda(rank), device_ids=[rank])
 
