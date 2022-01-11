@@ -23,13 +23,14 @@ def run(rank, model_str):
     if sys.argv[1] == 'mlp2':
         model = MLP2(nhid=config.emsize, nlayers=config.nlayers)
     if sys.argv[1] == 'moe':
-        model = MoE(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, n_expert=config.n_expert, capacity=config.capacity, nlayers=config.nlayers)
+        model = MoE(emsize=config.emsize, nhead=config.nheads, nhid=config.nhid, dropout=config.dropout, n_expert=config.n_expert, capacity=config.capacity, nlayers=config.nlayers)
     if sys.argv[1] == 'transformer':
-        model = Transformer(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, nlayers=config.nlayers)
+        model = Transformer(emsize=config.emsize, nhead=config.nheads, nhid=config.nhid, dropout=config.dropout, nlayers=config.nlayers)
 
     model = DDP(model.cuda(rank), device_ids=[rank])
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
     test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(rank) / 6
     test_input = test_input.chunk(world_size, 0)[rank]
 

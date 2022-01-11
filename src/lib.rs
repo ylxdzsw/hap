@@ -31,7 +31,7 @@ cpython::py_module_initializer!(spmd, |py, m| {
     m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyObject, hints: PyDict) -> PyResult<PyList> {
         let graph = build_graph(py, &py_nodes, &profiler, hints)?;
         // dump_graph(py, &py_nodes, &graph);
-        let computation_profiler = profiler::FlopsProfiler { device_flops: 6423710375980, n_devices: 4 };
+        let computation_profiler = profiler::FlopsProfiler { device_flops: 3270403090916, n_devices: 4 };
         let communication_profiler = profiler::BandwidthProfiler {
             all_gather:     7703543732,
             all_reduce:     4457607154,

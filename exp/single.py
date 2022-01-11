@@ -21,15 +21,16 @@ def run(rank, model_str):
     if model_str == 'mlp2':
         model = MLP2(nhid=config.emsize, nlayers=config.nlayers)
     if model_str == 'moe':
-        model = MoE(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, n_expert=config.n_expert, capacity=config.capacity, nlayers=config.nlayers)
+        model = MoE(emsize=config.emsize, nhead=config.nheads, nhid=config.nhid, dropout=config.dropout, n_expert=config.n_expert, capacity=config.capacity, nlayers=config.nlayers)
     if model_str == 'transformer':
-        model = Transformer(emsize=config.emsize, nhead=4, nhid=config.nhid, dropout=config.dropout, nlayers=config.nlayers)
+        model = Transformer(emsize=config.emsize, nhead=config.nheads, nhid=config.nhid, dropout=config.dropout, nlayers=config.nlayers)
 
     model = symbolic_trace(model).cuda(rank)
     annotate(model, { 'x': (config.batch_size, config.seqlen, config.emsize) })
     compile(model, load(f"strategy_{model_str}"), rank, config.world_size)
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
     test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(rank) / 6
 
     for iter in range(10):

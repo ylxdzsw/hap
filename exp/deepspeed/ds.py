@@ -29,7 +29,7 @@ class SwitchTransformerEncoderLayer(nn.Module):
     def __init__(self):
         super(SwitchTransformerEncoderLayer, self).__init__()
 
-        self.self_atten = torch.nn.MultiheadAttention(config.emsize, 4, dropout=config.dropout)
+        self.self_atten = torch.nn.MultiheadAttention(config.emsize, config.nheads, dropout=config.dropout)
 
         self.moe = deepspeed.moe.layer.MoE(
             hidden_size=config.emsize,
@@ -60,7 +60,7 @@ class MoE(torch.nn.Module):
         super().__init__()
 
         self.layers = torch.nn.ModuleList([
-            torch.nn.TransformerEncoderLayer(config.emsize, 4, config.nhid, config.dropout)
+            torch.nn.TransformerEncoderLayer(config.emsize, config.nheads, config.nhid, config.dropout)
             if i % 2 == 0 else
             SwitchTransformerEncoderLayer()
             for i in range(config.nlayers)
