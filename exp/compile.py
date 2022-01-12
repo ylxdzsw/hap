@@ -27,5 +27,5 @@ from pprint import pprint
 pprint(strategy)
 
 print(model.code)
-compile(model, strategy, rank=0, world_size=config.world_size)
+compile(model, strategy, global_rank=0, local_rank=0, world_size=config.world_size)
 print(model.code)

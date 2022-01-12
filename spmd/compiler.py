@@ -16,23 +16,19 @@ from utils import *
 def compile(
     module: torch.fx.graph_module.GraphModule,
     strategy: list[tuple[dict, dict]],
-    rank: int | None = None,
-    world_size: int | None = None
+    local_rank: int,
+    global_rank: int,
+    world_size: int
 ):
-    if rank is None:
-        rank = dist.get_rank()
-    if world_size is None:
-        world_size = dist.get_world_size()
-
     nodes = list(module.graph.nodes)
 
     new_graph = torch.fx.graph.Graph()
     tensor_dict_1 = {} # (origin_name, form) -> node_in_new_graph
     tensor_dict_2 = {}
 
-    module.default_stream = torch.cuda.default_stream(rank)
-    module.stream_1 = torch.cuda.Stream(rank)
-    module.stream_2 = torch.cuda.Stream(rank)
+    module.default_stream = torch.cuda.default_stream(local_rank)
+    module.stream_1 = torch.cuda.Stream(local_rank)
+    module.stream_2 = torch.cuda.Stream(local_rank)
 
     default_stream = new_graph.get_attr("default_stream")
     stream_1 = new_graph.get_attr("stream_1")
@@ -106,7 +102,7 @@ def compile(
         # new_graph.call_function(torch.cuda.set_stream, (default_stream,))
         new_input = new_graph.node_copy(raw_node)
         if form == "gather_0":
-            new_input = new_graph.call_function(torch.chunk, (new_input, world_size, 0))[rank]
+            new_input = new_graph.call_function(torch.chunk, (new_input, world_size, 0))[global_rank]
         else:
             assert form == "full"
 
@@ -155,7 +151,7 @@ def compile(
                 if form.startswith('gather'):
                     dim = int(form[-1])
                     p = module.get_parameter(raw_node.target)
-                    p.data = torch.chunk(p.data, world_size, dim)[rank]
+                    p.data = torch.chunk(p.data, world_size, dim)[global_rank]
 
         computations = [ comp for comp in computations if nodes[comp['origin_id']].op != 'placeholder' and nodes[comp['origin_id']].op != 'output' ]
 

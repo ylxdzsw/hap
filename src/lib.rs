@@ -31,12 +31,12 @@ cpython::py_module_initializer!(spmd, |py, m| {
     m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyObject, hints: PyDict) -> PyResult<PyList> {
         let graph = build_graph(py, &py_nodes, &profiler, hints)?;
         // dump_graph(py, &py_nodes, &graph);
-        let computation_profiler = profiler::FlopsProfiler { device_flops: 3270403090916, n_devices: 4 };
+        let computation_profiler = profiler::FlopsProfiler { device_flops: 3733811196666, n_devices: 4 };
         let communication_profiler = profiler::BandwidthProfiler {
-            all_gather:     7703543732,
-            all_reduce:     4457607154,
-            reduce_scatter: 7724567251,
-            all_to_all:     21389930375,
+            all_gather:     7703543732 >> 2,
+            all_reduce:     4457607154 >> 2,
+            reduce_scatter: 7724567251 >> 2,
+            all_to_all:     21389930375 >> 2,
         };
         let profiler = (computation_profiler, communication_profiler);
         dp3::dp3(py, &graph, &profiler)

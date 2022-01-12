@@ -58,10 +58,10 @@ class MoE(torch.nn.Module):
 
 class SwitchTransformerEncoderLayer(torch.nn.Module):
     def __init__(self, d_model, nhead, d_hidden=2048, dropout=0.1, activation=F.relu,
-                 layer_norm_eps=1e-5, n_expert=4, capacity=None, device=None, dtype=None) -> None:
+                 layer_norm_eps=1e-5, n_expert=4, capacity=None) -> None:
         super().__init__()
 
-        self.self_attn = torch.nn.MultiheadAttention(d_model, nhead, dropout=dropout, device=device, dtype=dtype)
+        self.self_attn = torch.nn.MultiheadAttention(d_model, nhead, dropout=dropout)
 
         self.gate_weight = torch.nn.Parameter(torch.empty((d_model, n_expert)))
         torch.nn.init.kaiming_uniform_(self.gate_weight, a=math.sqrt(5))
@@ -74,8 +74,8 @@ class SwitchTransformerEncoderLayer(torch.nn.Module):
         self.w2 = torch.nn.Parameter(torch.empty((n_expert, d_hidden, d_model)))
         torch.nn.init.kaiming_uniform_(self.w2, a=math.sqrt(5))
 
-        self.norm1 = torch.nn.LayerNorm(d_model, eps=layer_norm_eps, device=device, dtype=dtype)
-        self.norm2 = torch.nn.LayerNorm(d_model, eps=layer_norm_eps, device=device, dtype=dtype)
+        self.norm1 = torch.nn.LayerNorm(d_model, eps=layer_norm_eps)
+        self.norm2 = torch.nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.dropout1 = torch.nn.Dropout(dropout)
         self.dropout2 = torch.nn.Dropout(dropout)
 
