@@ -29,8 +29,7 @@ class FlopsProfiler:
         print(self.device_flops)
 
 class BandwidthProfiler:
-    def __init__(self) -> None:
-        world_size = torch.cuda.device_count()
+    def __init__(self, config, ranks) -> None:
         self.bandwidth = {}
 
         for op, op_args in (
@@ -41,43 +40,42 @@ class BandwidthProfiler:
         ):
             estimation = []
             for size in (4*1024*1024, 16*1024*1024, 64*1024*1024, 256*1024*1024):
-                ts = [ self.run_collective(op, size, world_size, op_args) for _ in range(5) ]
+                ts = [ self.run_collective(config, ranks, op, size, op_args) for _ in range(5) ]
                 print((size, sorted(ts)), flush=True)
                 estimation.append(size / sorted(ts)[2])
-            print(op.__name__, sum(estimation) / len(estimation), '\n')
             self.bandwidth[op.__name__] = math.floor(sum(estimation) / len(estimation))
-            print(self.bandwidth)
+        print(self.bandwidth)
 
-    def run_collective(self, op, size: int, world_size: int, op_args: tuple) -> float:
+    def run_collective(self, config, ranks, op, size: int, op_args: tuple) -> float:
         import os
-        os.environ['MASTER_ADDR'] = '127.0.0.1'
-        os.environ['MASTER_PORT'] = '39281'
-        os.environ['WORLD_SIZE'] = str(world_size)
+        os.environ['MASTER_ADDR'] = str(config.master_addr)
+        os.environ['MASTER_PORT'] = str(config.master_port)
+        os.environ['WORLD_SIZE'] = str(config.world_size)
 
         import torch.multiprocessing as mp
         ctx = mp.get_context('spawn')
         queue = ctx.Queue(1)
 
         if op in (collectives.all_gather, collectives.all_to_all):
-            size //= world_size # the size argument is the size of the original tensor, we convert it to the size of input in experiment
+            size //= config.world_size # the size argument is the size of the original tensor, we convert it to the size of input in experiment
 
-        for rank in range(world_size):
-            ctx.Process(target=_run_collective_worker, args=(op, size, rank, queue, op_args)).start()
+        for local_rank, global_rank in enumerate(ranks):
+            ctx.Process(target=_run_collective_worker, args=(op, size, queue, op_args, global_rank, local_rank)).start()
 
         for p in mp.active_children():
             p.join()
 
         return queue.get()
 
-def _run_collective_worker(op, input_slice_size: int, rank: int, queue, op_args: tuple):
+def _run_collective_worker(op, input_slice_size: int, queue, op_args: tuple, global_rank: int, local_rank: int):
     import torch.distributed as dist
-    dist.init_process_group('nccl', rank=rank)
+    dist.init_process_group('nccl', rank=global_rank)
 
-    tensor = torch.rand(256, input_slice_size // 1024).to(rank)
+    tensor = torch.rand(256, input_slice_size // 1024).to(local_rank)
     for _ in range(10):
         with measure_time() as time:
             op(tensor, *op_args)
-            torch.cuda.synchronize(rank)
+            torch.cuda.synchronize(local_rank)
 
-    if rank == 0:
+    if local_rank == 0:
         queue.put(time.time)

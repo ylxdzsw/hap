@@ -28,15 +28,18 @@ cpython::py_module_initializer!(spmd, |py, m| {
     }
 
     #[allow(clippy::manual_strip)]
-    m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyObject, hints: PyDict) -> PyResult<PyList> {
-        let graph = build_graph(py, &py_nodes, &profiler, hints)?;
+    m.add(py, "spmd", cpython::py_fn!(py, spmd(py_nodes: PyList, profiler: PyDict, hints: PyDict) -> PyResult<PyList> {
+        let graph = build_graph(py, &py_nodes, hints)?;
         // dump_graph(py, &py_nodes, &graph);
-        let computation_profiler = profiler::FlopsProfiler { device_flops: 3733811196666, n_devices: 4 };
+        let computation_profiler = profiler::FlopsProfiler {
+            device_flops: profiler.get_item(py, "device_flops").unwrap().extract(py)?,
+            n_devices: profiler.get_item(py, "n_devices").unwrap().extract(py)?
+        };
         let communication_profiler = profiler::BandwidthProfiler {
-            all_gather:     7703543732 >> 2,
-            all_reduce:     4457607154 >> 2,
-            reduce_scatter: 7724567251 >> 2,
-            all_to_all:     21389930375 >> 2,
+            all_gather: profiler.get_item(py, "all_gather").unwrap().extract(py)?,
+            all_reduce: profiler.get_item(py, "all_reduce").unwrap().extract(py)?,
+            reduce_scatter: profiler.get_item(py, "reduce_scatter").unwrap().extract(py)?,
+            all_to_all: profiler.get_item(py, "all_to_all").unwrap().extract(py)?
         };
         let profiler = (computation_profiler, communication_profiler);
         dp3::dp3(py, &graph, &profiler)
@@ -45,7 +48,7 @@ cpython::py_module_initializer!(spmd, |py, m| {
     Ok(())
 });
 
-fn build_graph(py: Python, py_nodes: &PyList, profiler: &PyObject, hints: PyDict) -> PyResult<Graph> {
+fn build_graph(py: Python, py_nodes: &PyList, hints: PyDict) -> PyResult<Graph> {
     macro_rules! py_meta {
         ($py_node: expr, $meta_name: expr) => { py_meta!($py_node, $meta_name, _) };
         ($py_node: expr, $meta_name: expr, $out_type: ty) => {{

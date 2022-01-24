@@ -147,6 +147,9 @@ def run(global_rank, local_rank):
         if local_rank == 0:
             print(wall_time)
 
+    if not config.trace:
+        return
+
     with profile(
         activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
         # record_shapes = True,

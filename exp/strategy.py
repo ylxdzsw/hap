@@ -1,21 +1,11 @@
 import config
-import sys
 import torch
 import torch.fx
 
-from models import MLP, MLP2, MoE, Transformer
 from annotator import annotate
-from compiler import compile
 from utils import *
 
-if sys.argv[1] == 'mlp':
-    model = symbolic_trace(MLP(nhid=config.emsize, nlayers=config.nlayers))
-if sys.argv[1] == 'mlp2':
-    model = symbolic_trace(MLP2(nhid=config.emsize, nlayers=config.nlayers))
-if sys.argv[1] == 'moe':
-    model = symbolic_trace(MoE(emsize=config.emsize, nhead=config.nheads, nhid=config.nhid, dropout=config.dropout, n_expert=config.n_expert, capacity=config.capacity, nlayers=config.nlayers))
-if sys.argv[1] == 'transformer':
-    model = symbolic_trace(Transformer(emsize=config.emsize, nhead=config.nheads, nhid=config.nhid, dropout=config.dropout, nlayers=config.nlayers))
+model = symbolic_trace(config.get_model(seed=39))
 
 print(model.code)
 
@@ -29,8 +19,8 @@ for i, node in enumerate(nodes):
 
 import spmd
 
-strategy = spmd.spmd(nodes, {}, {})
-save(f"strategy_{sys.argv[1]}", strategy)
+strategy = spmd.spmd(nodes, config.profiler_data, {})
+save(f"strategy_{config.model_name}", strategy)
 
 # from pprint import pprint
 # pprint(strategy)

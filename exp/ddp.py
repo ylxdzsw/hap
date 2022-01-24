@@ -6,36 +6,24 @@ from torch.profiler import profile, record_function, ProfilerActivity
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from models import MLP, MLP2, MoE, Transformer
 from utils import *
 
-def run(global_rank, local_rank, model_str):
+def run(global_rank, local_rank):
     import torch.distributed as dist
     dist.init_process_group('nccl', rank=global_rank)
 
-    torch.manual_seed(0)
-    # torch.use_deterministic_algorithms(True)
+    model = symbolic_trace(config.get_model(seed=39)).cuda(local_rank)
+    model = DDP(model, device_ids=[local_rank])
 
-    if model_str == 'mlp':
-        model = MLP(nhid=config.emsize, nlayers=config.nlayers)
-    if model_str == 'mlp2':
-        model = MLP2(nhid=config.emsize, nlayers=config.nlayers)
-    if model_str == 'moe':
-        model = MoE(emsize=config.emsize, nhead=config.nheads, nhid=config.nhid, dropout=config.dropout, n_expert=config.n_expert, capacity=config.capacity, nlayers=config.nlayers)
-    if model_str == 'transformer':
-        model = Transformer(emsize=config.emsize, nhead=config.nheads, nhid=config.nhid, dropout=config.dropout, nlayers=config.nlayers)
-
-    model = DDP(model.cuda(local_rank), device_ids=[local_rank])
-
-    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
     test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(local_rank) / 6
     test_input = test_input.chunk(config.world_size, 0)[global_rank]
 
     for iter in range(10):
         with measure_time(f"iteration {iter}") as wall_time:
             loss = model(test_input)
-            aggregated_loss = loss.detach().clone()
+            aggregated_loss = loss.detach().clone() * config.world_size # not sure why we need this but the loss seems to be smaller than expected?
             dist.reduce(aggregated_loss, 0)
             if global_rank == 0:
                 print(f"loss {iter}:", aggregated_loss.cpu().numpy())
@@ -47,6 +35,9 @@ def run(global_rank, local_rank, model_str):
             dist.barrier()
         if local_rank == 0:
             print(wall_time)
+
+    if not config.trace:
+        return
 
     with profile(
         activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -85,7 +76,7 @@ if __name__ == '__main__':
     mp.set_start_method('spawn')
 
     for local_rank, global_rank in enumerate(ranks):
-        mp.Process(target=run, args=(global_rank, local_rank, sys.argv[2])).start()
+        mp.Process(target=run, args=(global_rank, local_rank)).start()
 
     for p in mp.active_children():
         p.join()

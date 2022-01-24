@@ -10,7 +10,6 @@ import deepspeed
 deepspeed.init_distributed()
 deepspeed.utils.groups.initialize(ep_size=config.world_size)
 
-import sys
 import time
 import torch
 import torch.distributed as dist
@@ -76,8 +75,6 @@ model = MoE()
 model_engine, optimizer, _, __ = deepspeed.initialize(
     args=args, model=model, model_parameters=filter(lambda p: p.requires_grad, model.parameters()))
 
-# ddp_model = DDP(model, device_ids=[0])
-
 # optimizer = torch.optim.SGD(model.parameters(), lr=1e-8)
 rand_input = torch.rand(config.batch_size // config.world_size, config.seqlen, config.emsize).to(model_engine.local_rank) / 6
 
@@ -88,6 +85,9 @@ for i in range(10):
     # torch.cuda.synchronize()
     model_engine.step()
     print(f"iter {i}, time {time.time() - start_time}s")
+
+if not config.trace:
+    raise SystemExit
 
 from torch.profiler import profile, record_function, ProfilerActivity
 
