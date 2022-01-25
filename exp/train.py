@@ -6,48 +6,40 @@ import torch
 import torch.fx
 from torch.profiler import profile, record_function, ProfilerActivity
 
-from models import TransformerR
 from annotator import annotate
 from compiler import compile
 from utils import *
-
-def get_batch(source, i):
-    data = source[:, i:i+config.seq_len]
-    target = source[:, i+1:i+1+config.seq_len]
-    return data, target
 
 def run(global_rank, local_rank):
     import torch.distributed as dist
     dist.init_process_group('nccl', rank=global_rank)
 
     ntokens, train_data, test_data, valid_data = config.get_data()
-    train_data.cuda(local_rank)
+    train_data = train_data.cuda(local_rank)
 
     model = symbolic_trace(config.get_model(seed=39)).cuda(local_rank)
     annotate(model, config.input_shape())
     compile(model, load(f"strategy_{config.model_name}"), global_rank=global_rank, local_rank=local_rank, world_size=config.world_size)
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
-    test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(local_rank) / 6
-
-    total_loss = 0.
-    start_time = time.time()
+    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
 
     for epoch in range(config.epoch):
-        for batch, i in enumerate(range(0, train_data.size(1) - config.seqlen, config.seqlen)):
+        total_loss = 0.
+        start_time = time.time()
+        for batch, offset in enumerate(range(0, train_data.size(1) - config.seqlen, config.seqlen)):
             loss = model(
-                x = train_data[:, i:i+config.seq_len],
-                y = train_data[:, i+1:i+1+config.seq_len]
-            )
+                x = train_data[:, offset:offset+config.seqlen],
+                y = train_data[:, offset+1:offset+1+config.seqlen]
+            ) / config.batch_size / config.seqlen
 
-            total_loss += loss.item()
+            total_loss += loss.detach()
             if batch % config.log_iterval == 0 and batch > 0:
                 dist.reduce(total_loss, 0)
                 if global_rank == 0:
-                    cur_loss = total_loss / config.log_iterval
+                    avg_loss = total_loss / config.log_iterval
                     elapsed = time.time() - start_time
-                    print(f"epoch {epoch:3d} | batch {batch:5d} | ppl {math.exp(cur_loss):02.2f} | ms/batch {elapsed*1000/config.log_iterval:5.2f}")
+                    print(f"epoch {epoch:3d} | batch {batch:3d} | ppl {math.exp(avg_loss):02.2f} | ms/batch {elapsed*1000/config.log_iterval:5.2f}")
                 total_loss = 0.
                 start_time = time.time()
 

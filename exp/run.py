@@ -13,7 +13,7 @@ def run(global_rank, local_rank):
     dist.init_process_group('nccl', rank=global_rank)
 
     model = symbolic_trace(config.get_model(seed=39)).cuda(local_rank)
-    annotate(model, { 'x': (config.batch_size, config.seqlen, config.emsize) })
+    annotate(model, config.input_shape())
     compile(model, load(f"strategy_{config.model_name}"), global_rank=global_rank, local_rank=local_rank, world_size=config.world_size)
 
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)

@@ -47,18 +47,15 @@ def get_model(seed=None):
         ntokens, *_ = get_data()
         return TransformerR(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
 
-data_cache = None
 def get_data():
-    global data_cache
-    if data_cache is None:
-        sys.path.insert(1, f"{sys.path[0]}/../wikitext")
-        import data
-        corpus = data.Corpus(f"{sys.path[0]}/../wikitext")
-        train_data = data.batchify(corpus.train, batch_size)
-        test_data = data.batchify(corpus.test, batch_size)
-        valid_data = data.batchify(corpus.valid, batch_size)
-        data_cache = len(corpus.dictionary), train_data, test_data, valid_data
-    return data_cache
+    sys.path.insert(1, f"{sys.path[0]}/../wikitext")
+    import data
+    corpus = data.Corpus(f"{sys.path[0]}/../wikitext")
+    train_data = data.batchify(corpus.train, batch_size)
+    test_data = data.batchify(corpus.test, batch_size)
+    valid_data = data.batchify(corpus.valid, batch_size)
+    ntokens = world_size * (len(corpus.dictionary) // world_size + 1) # we have to ensure that it is dividable
+    return ntokens, train_data, test_data, valid_data
 
 def input_shape():
     if model_name.endswith('R'):

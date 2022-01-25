@@ -12,8 +12,6 @@ print(model.code)
 annotate(model, config.input_shape())
 print_annotated_graph(model.graph)
 
-raise SystemExit
-
 nodes = list(model.graph.nodes)
 
 for i, node in enumerate(nodes):

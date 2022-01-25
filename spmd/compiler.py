@@ -150,7 +150,10 @@ def compile(
                 form = computation['output_forms'][0]
                 if form.startswith('gather'):
                     dim = int(form[-1])
-                    p = module.get_parameter(raw_node.target)
+                    try:
+                        p = module.get_parameter(raw_node.target)
+                    except AttributeError:
+                        p = module.get_buffer(raw_node.target)
                     p.data = torch.chunk(p.data, world_size, dim)[global_rank]
 
         computations = [ comp for comp in computations if nodes[comp['origin_id']].op != 'placeholder' and nodes[comp['origin_id']].op != 'output' ]

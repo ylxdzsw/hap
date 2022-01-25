@@ -9,10 +9,10 @@ from compiler import compile
 from utils import *
 
 model = symbolic_trace(config.get_model(seed=39))
-annotate(model, { 'x': (config.batch_size, config.seqlen, config.emsize) })
+annotate(model, config.input_shape())
 print_annotated_graph(model.graph)
 
-strategy = load(f"strategy_{sys.argv[1]}")
+strategy = load(f"strategy_{config.model_name}")
 
 from pprint import pprint
 pprint(strategy)

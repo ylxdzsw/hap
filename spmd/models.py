@@ -34,7 +34,7 @@ class MLP2(torch.nn.Module):
 class Transformer(torch.nn.Module):
     def __init__(self, emsize=2048, nhead=4, nhid=2048, dropout=0.2, nlayers=2):
         super().__init__()
-        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout) for _ in range(nlayers) ])
+        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
 
     def forward(self, x):
         for layer in self.layers:
@@ -45,7 +45,7 @@ class MoE(torch.nn.Module):
     def __init__(self, emsize, nhead, nhid, dropout, n_expert, capacity, nlayers=2): # capacity should be seq_len / n_expert * factor
         super().__init__()
         self.layers = torch.nn.ModuleList([
-            torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout)
+            torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True)
             if i % 2 == 0 else
             SwitchTransformerEncoderLayer(emsize, nhead, nhid, dropout, n_expert=n_expert, capacity=capacity)
             for i in range(nlayers)
@@ -65,12 +65,12 @@ class TransformerR(torch.nn.Module):
         # self.pe_dropout = torch.nn.Dropout(dropout)
         self.register_buffer('src_mask', torch.triu(torch.full((seqlen, seqlen), float('-inf')), diagonal=1))
         self.encoder = torch.nn.Embedding(ntokens, emsize)
-        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout) for _ in range(nlayers) ])
+        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
         self.decoder = torch.nn.Linear(emsize, ntokens)
 
     def forward(self, x, y):
         x = self.encoder(x) * math.sqrt(self.emsize)
-        src_mask = self.src_mask
+        src_mask = self.src_mask # otherwise it produces a load statement each time, which not only makes multiple communications but also bug in compiling (we will slice the same tensor multiple times)
         x += self.pe
         for layer in self.layers:
             x = layer(x, src_mask)
@@ -83,7 +83,7 @@ class SwitchTransformerEncoderLayer(torch.nn.Module):
                  layer_norm_eps=1e-5, n_expert=4, capacity=None) -> None:
         super().__init__()
 
-        self.self_attn = torch.nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        self.self_attn = torch.nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
 
         self.gate_weight = torch.nn.Parameter(torch.empty((d_model, n_expert)))
         torch.nn.init.kaiming_uniform_(self.gate_weight, a=math.sqrt(5))
