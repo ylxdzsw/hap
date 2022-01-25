@@ -56,6 +56,28 @@ class MoE(torch.nn.Module):
             x = layer(x)
         return torch.sum(x)
 
+class TransformerR(torch.nn.Module):
+    def __init__(self, ntokens, seqlen, emsize=2048, nhead=4, nhid=2048, dropout=0.2, nlayers=2):
+        super().__init__()
+        self.emsize = emsize
+        self.criterion = torch.nn.NLLLoss(reduction='sum')
+        self.register_buffer('pe', torch.Tensor(positional_encoding(seqlen, emsize)).unsqueeze(0))
+        # self.pe_dropout = torch.nn.Dropout(dropout)
+        self.register_buffer('src_mask', torch.triu(torch.full((seqlen, seqlen), float('-inf')), diagonal=1))
+        self.encoder = torch.nn.Embedding(ntokens, emsize)
+        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout) for _ in range(nlayers) ])
+        self.decoder = torch.nn.Linear(emsize, ntokens)
+
+    def forward(self, x, y):
+        x = self.encoder(x) * math.sqrt(self.emsize)
+        src_mask = self.src_mask
+        x += self.pe
+        for layer in self.layers:
+            x = layer(x, src_mask)
+        x = self.decoder(x)
+        x = torch.log_softmax(x, dim=-1)
+        return self.criterion(x.transpose(1, 2), y) # the input to NLL loss is (N, C, ...), so we move the class prediction to the second dimension
+
 class SwitchTransformerEncoderLayer(torch.nn.Module):
     def __init__(self, d_model, nhead, d_hidden=2048, dropout=0.1, activation=F.relu,
                  layer_norm_eps=1e-5, n_expert=4, capacity=None) -> None:
@@ -152,3 +174,10 @@ def _switch_gating(gate_input, n_expert: int, capacity: int, gate_weight, train:
     dispatch_tensor = (combine_tensor > 0).to(torch.float32)
 
     return dispatch_tensor, combine_tensor
+
+def positional_encoding(seqlen, emsize):
+    import numpy as np
+    p = np.array([[pos / np.power(10000, 2 * (j // 2) / emsize) for j in range(emsize)] for pos in range(seqlen)])
+    p[:, 0::2] = np.sin(p[:, 0::2])
+    p[:, 1::2] = np.cos(p[:, 1::2])
+    return p

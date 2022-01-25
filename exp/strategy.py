@@ -9,8 +9,10 @@ model = symbolic_trace(config.get_model(seed=39))
 
 print(model.code)
 
-annotate(model, { 'x': (config.batch_size, config.seqlen, config.emsize) })
+annotate(model, config.input_shape())
 print_annotated_graph(model.graph)
+
+raise SystemExit
 
 nodes = list(model.graph.nodes)
 

@@ -18,6 +18,9 @@ def output_dims(node: torch.fx.node.Node):
         return None
     return len(output_shape)
 
+def is_literal_scalar(x):
+    return isinstance(x, int) or isinstance(x, float)
+
 # annotate populates the `meta` field of nodes with following items
 # output_shape: the shape of the output of this node. Can be a tuple or tuple of tuple (for multiple outputs)
 # output_is_tuple: indicates whether the output is a tuple. True if it is, non-exist if not.
@@ -27,6 +30,7 @@ def output_dims(node: torch.fx.node.Node):
 # is_output: if the output of this node is an output of the model
 # value: the value of this node if it is known at compile time.
 # flops: rough estimation about the number of flops. Copy is also counted as a flop.
+# is_buffer: if an parameter is actually a buffer that does not require gradients
 def annotate(traced_module: torch.fx.graph_module.GraphModule, input_shapes: "dict[str, tuple[int, ...]]"):
     for node in traced_module.graph.nodes:
         if node.op == 'placeholder':
@@ -34,7 +38,12 @@ def annotate(traced_module: torch.fx.graph_module.GraphModule, input_shapes: "di
             continue
 
         if node.op == 'get_attr':
-            node.meta['output_shape'] = tuple(traced_module.get_parameter(node.target).shape)
+            try:
+                p = traced_module.get_parameter(node.target)
+            except AttributeError:
+                p = traced_module.get_buffer(node.target)
+                node.meta['is_buffer'] = True
+            node.meta['output_shape'] = tuple(p.shape)
             continue
 
         if node.op == 'call_function':
@@ -210,11 +219,11 @@ def annotate_getitem(node: torch.fx.node.Node):
 def annotate_elementwise_binary(node: torch.fx.node.Node):
     x, y = node.meta['arg_dict']['x'], node.meta['arg_dict']['y']
 
-    if 'value' in x.meta and (isinstance(y, int) or 'value' in y.meta):
-        node.meta['value'] = node.target(x.meta['value'], y if isinstance(y, int) else y.meta['value'])
+    if 'value' in x.meta and (is_literal_scalar(y) or 'value' in y.meta):
+        node.meta['value'] = node.target(x.meta['value'], y if is_literal_scalar(y) else y.meta['value'])
 
 
-    if isinstance(y, int) or y.meta['output_shape'] == ():
+    if is_literal_scalar(y) or y.meta['output_shape'] == ():
         node.meta['output_shape'] = x.meta['output_shape']
         node.meta['signatures'] = [ ({ 'x': f"gather_{i}", 'y': 'full' }, f"gather_{i}" ) for i in range(output_dims(x)) ]
         if node.target in (operator.floordiv, operator.truediv, operator.mul):
@@ -227,8 +236,31 @@ def annotate_elementwise_binary(node: torch.fx.node.Node):
         if node.target is operator.mul:
             node.meta['signatures'].append(({ 'x': 'full', 'y': 'reduce' }, 'reduce'))
     else:
-        print(x.meta, y.meta)
-        raise Exception("TODO")
+        # try handle simple broadcast that only involves 1-sized dimensions
+        if output_dims(x) != output_dims(y):
+            raise Exception("TODO")
+
+        output_shape = ()
+        signatures = []
+        for dim, (x_size, y_size) in enumerate(zip(x.meta['output_shape'], y.meta['output_shape'])):
+            if x_size == y_size:
+                signatures.append(({ 'x': f"gather_{dim}", 'y': f"gather_{dim}" }, f"gather_{dim}"))
+                output_shape = (*output_shape, x_size)
+            elif x_size == 1:
+                signatures.append(({ 'x': "full", 'y': f"gather_{dim}" }, f"gather_{dim}"))
+                output_shape = (*output_shape, y_size)
+            elif y_size == 1:
+                signatures.append(({ 'x': f"gather_{dim}", 'y': "full" }, f"gather_{dim}"))
+                output_shape = (*output_shape, x_size)
+            else:
+                raise Exception("TODO")
+
+        node.meta['output_shape'] = output_shape
+        node.meta['signatures'] = signatures
+        if node.target in (operator.floordiv, operator.truediv, operator.mul):
+            node.meta['signatures'].append(({ 'x': 'reduce', 'y': 'full' }, 'reduce'))
+        if node.target is operator.mul:
+            node.meta['signatures'].append(({ 'x': 'full', 'y': 'reduce' }, 'reduce'))
 
     node.meta['flops'] = math.prod(node.meta['output_shape'])
 
@@ -338,8 +370,9 @@ def annotate_matmul(node: torch.fx.node.Node):
 
     node.meta['flops'] = 3 * B * E * C * M * P
 
-@annotation_rule(torch.nn.functional.softmax)
-def annotate_softmax(node: torch.fx.node.Node):
+@annotation_rule(torch.nn.functional.softmax, ratio=5)
+@annotation_rule(torch.log_softmax, ratio=15)
+def annotate_softmax(node: torch.fx.node.Node, ratio: int):
     input_node, dim = node.meta['arg_dict']['input'], node.meta['arg_dict']['dim']
 
     assert isinstance(dim, int)
@@ -350,7 +383,7 @@ def annotate_softmax(node: torch.fx.node.Node):
     node.meta['output_shape'] = input_node.meta['output_shape']
     node.meta['signatures'] = [({ 'input': f"gather_{i}" }, f"gather_{i}") for i in range(output_dims(node)) if i != dim ]
 
-    node.meta['flops'] = 5 * math.prod(input_node.meta['output_shape'])
+    node.meta['flops'] = ratio * math.prod(input_node.meta['output_shape'])
 
 @annotation_rule(torch.nn.functional.dropout)
 def annotate_dropout(node: torch.fx.node.Node):
@@ -476,7 +509,8 @@ def annotate_attention(node: torch.fx.node.Node):
     out_proj_bias = node.meta['arg_dict']['out_proj_bias']
 
     assert node.meta['arg_dict']['key_padding_mask'] is None
-    assert node.meta['arg_dict']['attn_mask'] is None
+
+    attn_mask = node.meta['arg_dict']['attn_mask']
 
     assert node.meta['arg_dict']['use_separate_proj_weight'] is False
 
@@ -492,6 +526,10 @@ def annotate_attention(node: torch.fx.node.Node):
 
     node.meta['output_is_tuple'] = True
 
+    addition = {}
+    if attn_mask is not None:
+        addition['attn_mask'] = 'full'
+
     node.meta['signatures'] = [
         ({ # DP: gather on N dimension
             'query': 'gather_1',
@@ -501,6 +539,7 @@ def annotate_attention(node: torch.fx.node.Node):
             'in_proj_bias': 'full',
             'out_proj_weight': 'full',
             'out_proj_bias': 'full',
+            **addition
         }, ('gather_1', 'gather_0')),
         ({ # The inequivalent Megatron style transform that causes mismatch on the assignment of weights
             'query': 'gather_2',
@@ -510,5 +549,40 @@ def annotate_attention(node: torch.fx.node.Node):
             'in_proj_bias': 'gather_0',
             'out_proj_weight': 'gather_1',
             'out_proj_bias': 'full', # !!! very wrong
+            **addition
         }, ('reduce', 'reduce')) # not sure about the weights, but it is not used anyway
     ]
+
+@annotation_rule(torch.nn.functional.embedding)
+def annotate_embedding(node: torch.fx.node.Node):
+    input_node = node.meta['arg_dict']['input']
+    weight_node = node.meta['arg_dict']['weight']
+
+    N, S = input_node.meta['output_shape']
+    T, E = weight_node.meta['output_shape']
+
+    node.meta['output_shape'] = N, S, E
+    node.meta['flops'] = 0
+    node.meta['signatures'] = [
+        ({ 'input': 'gather_0', 'weight': 'full' }, 'gather_0'),
+        ({ 'input': 'gather_1', 'weight': 'full' }, 'gather_1'),
+        ({ 'input': 'full', 'weight': 'gather_1' }, 'gather_2')
+    ]
+
+@annotation_rule(torch.nn.functional.nll_loss)
+def annotate_nll(node: torch.fx.node.Node):
+    input_node = node.meta['arg_dict']['input']
+    target_node = node.meta['arg_dict']['target']
+
+    assert output_dims(target_node) == output_dims(input_node) - 1
+
+    n_extra_dims = output_dims(input_node) - 2
+
+    assert node.meta['arg_dict']['weight'] is None
+    assert node.meta['arg_dict']['reduction'] == 'sum'
+
+    node.meta['output_shape'] = ()
+    node.meta['signatures'] = [({ 'input': 'gather_0', 'target': 'gather_0' }, 'reduce')]
+    for i in range(n_extra_dims):
+        node.meta['signatures'].append(({ 'input': f'gather_{i+2}', 'target': f'gather_{i+1}' }, 'reduce'))
+    node.meta['flops'] = math.prod(input_node.meta['output_shape'])
