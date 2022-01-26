@@ -15,7 +15,7 @@ seqlen = 256
 emsize = 1024
 nhid = emsize * 4
 
-dropout = 0.0
+dropout = 0.5
 nheads = 4
 
 master_addr = "127.0.0.1"
