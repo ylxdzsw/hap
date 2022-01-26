@@ -27,8 +27,10 @@ def compile(
     tensor_dict_2 = {}
 
     module.default_stream = torch.cuda.default_stream(local_rank)
-    module.stream_1 = module.default_stream # torch.cuda.Stream(local_rank)
-    module.stream_2 = module.default_stream # torch.cuda.Stream(local_rank)
+    # module.stream_1 = module.default_stream # torch.cuda.Stream(local_rank)
+    # module.stream_2 = module.default_stream # torch.cuda.Stream(local_rank)
+    module.stream_1 = torch.cuda.Stream(local_rank)
+    module.stream_2 = torch.cuda.Stream(local_rank)
 
     default_stream = new_graph.get_attr("default_stream")
     stream_1 = new_graph.get_attr("stream_1")
