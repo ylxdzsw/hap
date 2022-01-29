@@ -16,8 +16,8 @@ def run(global_rank, local_rank):
     annotate(model, config.input_shape())
     compile(model, load(f"strategy_{config.model_name}"), global_rank=global_rank, local_rank=local_rank, world_size=config.world_size)
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
     test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(local_rank) / 6
 
     for iter in range(10):

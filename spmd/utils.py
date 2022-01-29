@@ -24,7 +24,7 @@ def measure_time(name="", disable_gc=False):
         time: float
         name: str
         def __repr__(self) -> str:
-            return f"task {name} finished in {toc - tic:.3}s"
+            return f"task {name} finished in {toc - tic:.4}s"
 
     import time
 

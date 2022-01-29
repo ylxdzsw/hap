@@ -7,7 +7,7 @@ sys.path.insert(1, f"{sys.path[0]}/../spmd")
 
 model_name = "moe"
 
-world_size = 4
+world_size = 8
 nlayers = 6
 n_expert = 4 * world_size
 batch_size = 32 * world_size
@@ -20,9 +20,9 @@ nhid = emsize * 4
 dropout = 0.1
 nheads = 4
 
-master_addr = "127.0.0.1"
+# master_addr = "127.0.0.1"
 # master_addr = "10.28.1.24" # g9
-# master_addr = "10.28.1.27" # g12
+master_addr = "10.28.1.27" # g12
 master_port = 39261
 
 trace = True

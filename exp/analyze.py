@@ -27,7 +27,7 @@ for event in trace['traceEvents']:
 
 for stream, info in stream_info.items():
     print(f"=== {stream} ===")
-    print(f"total_time: {info.time:.3f}s")
+    print(f"total_time: {info.time:.4f}s")
     for name in sorted(list(info.ops), key=lambda x: len(x))[:5]:
         print(name)
     print()
@@ -45,6 +45,12 @@ for event in trace['traceEvents']:
     if 'copy_device_to_device' in event['name']:
         copy_device_to_device_time += event['dur'] / 1_000_000
 
-
 print("Total Nccl time: ", nccl_time)
 print("Total Copy time: ", copy_device_to_device_time)
+
+steps = []
+for event in trace['traceEvents']:
+    if 'ProfilerStep' in event['name']:
+        steps.append(event['dur'] / 1_000_000)
+
+print("Avg Wall time: ", sum(steps) / len(steps))
