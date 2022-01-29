@@ -104,13 +104,14 @@ def compile(
         # new_graph.call_function(torch.cuda.set_stream, (default_stream,))
         new_input = new_graph.node_copy(raw_node)
         if form == "gather_0":
-            new_input = new_graph.call_function(torch.chunk, (new_input, world_size, 0))[global_rank]
+            new_input = new_graph.call_function(torch.chunk, (new_input, world_size, 0))
+            new_input = new_graph.call_function(operator.getitem, (new_input, global_rank))
         else:
             assert form == "full"
 
         new_input_chunks = new_graph.call_function(torch.chunk, (new_input, 2, 0))
-        tensor_dict_1[(raw_node.name, 'full')] = new_graph.call_function(operator.getitem, (new_input_chunks, 0))
-        tensor_dict_2[(raw_node.name, 'full')] = new_graph.call_function(operator.getitem, (new_input_chunks, 1))
+        tensor_dict_1[(raw_node.name, form)] = new_graph.call_function(operator.getitem, (new_input_chunks, 0))
+        tensor_dict_2[(raw_node.name, form)] = new_graph.call_function(operator.getitem, (new_input_chunks, 1))
         all_wait_default()
 
     def gen_output(raw_node):

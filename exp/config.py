@@ -1,28 +1,32 @@
 import sys
+import math
 
 if sys.path[0] == "":
     sys.path[0] = "."
 sys.path.insert(1, f"{sys.path[0]}/../spmd")
 
-model_name = "transformerR"
+model_name = "moe"
 
-world_size = 4
-nlayers = 4
-n_expert = 32
-capacity = 10
+world_size = 8
+nlayers = 6
+n_expert = 4 * world_size
 batch_size = 32 * world_size
 seqlen = 256
+capacity_factor = 1.25
+capacity = math.floor(seqlen / n_expert * capacity_factor)
 emsize = 1024
 nhid = emsize * 4
 
-dropout = 0.5
+dropout = 0.1
 nheads = 4
 
-master_addr = "127.0.0.1"
+# master_addr = "127.0.0.1"
 # master_addr = "10.28.1.24" # g9
+master_addr = "10.28.1.27" # g12
 master_port = 39261
 
-trace = False
+trace = True
+# trace = False
 
 epoch = 40
 log_iterval = 10

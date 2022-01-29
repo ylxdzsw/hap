@@ -15,7 +15,7 @@ class SwitchTransformerEncoderLayer(nn.Module):
     def __init__(self, global_rank):
         super().__init__()
 
-        self.self_atten = torch.nn.MultiheadAttention(config.emsize, config.nheads, dropout=config.dropout)
+        self.self_atten = torch.nn.MultiheadAttention(config.emsize, config.nheads, dropout=config.dropout, batch_first=True)
 
         self.moe = fmoe.FMoETransformerMLP(
             num_expert=config.n_expert // config.world_size, # this is the number of experts on *each* worker
@@ -39,52 +39,52 @@ class SwitchTransformerEncoderLayer(nn.Module):
         x = self.self_atten(x, x, x, need_weights=False)[0]
         return self.dropout(x)
 
-# class NaiveSwitchTransformerEncoderLayer(nn.Module):
-#     def __init__(self):
-#         super().__init__()
+class NaiveSwitchTransformerEncoderLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
 
-#         self.self_atten = torch.nn.MultiheadAttention(config.emsize, 4, dropout=config.dropout)
+        self.self_atten = torch.nn.MultiheadAttention(config.emsize, config.nheads, dropout=config.dropout, batch_first=True)
 
-#         self.moe = fmoe.FMoE(
-#             num_expert=config.n_expert // config.world_size, # this is the number of experts on *each* worker
-#             d_model=config.emsize,
-#             top_k=1,
-#             world_size=world_size,
+        self.moe = fmoe.FMoE(
+            num_expert=config.n_expert // config.world_size, # this is the number of experts on *each* worker
+            d_model=config.emsize,
+            top_k=1,
+            world_size=config.world_size,
 
-#             expert=lambda d: torch.nn.Sequential(
-#                 # LogShape(),
-#                 torch.nn.Linear(d, config.nhid),
-#                 torch.nn.ReLU(),
-#                 torch.nn.Linear(config.nhid, d),
-#             ),
-#         )
+            expert=lambda d: torch.nn.Sequential(
+                # LogShape(),
+                torch.nn.Linear(d, config.nhid),
+                torch.nn.ReLU(),
+                torch.nn.Linear(config.nhid, d),
+            ),
+        )
 
-#         self.norm1 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
-#         self.norm2 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
-#         self.dropout = torch.nn.Dropout(config.dropout)
+        self.norm1 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
+        self.norm2 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
+        self.dropout = torch.nn.Dropout(config.dropout)
 
-#     def forward(self, x):
-#         x = self.norm1(x + self._sa_block(x))
-#         x = self.norm2(x + self.moe(x))
-#         return x
+    def forward(self, x):
+        x = self.norm1(x + self._sa_block(x))
+        x = self.norm2(x + self.moe(x))
+        return x
 
-#     def _sa_block(self, x):
-#         x = self.self_atten(x, x, x, need_weights=False)[0]
-#         return self.dropout(x)
+    def _sa_block(self, x):
+        x = self.self_atten(x, x, x, need_weights=False)[0]
+        return self.dropout(x)
 
-# class LogShape(torch.nn.Module):
-#     def __init__(self) -> None:
-#         super().__init__()
-#     def forward(self, x):
-#         print(x.shape)
-#         return x
+class LogShape(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+    def forward(self, x):
+        print(x.shape)
+        return x
 
 class MoE(torch.nn.Module):
     def __init__(self, global_rank) -> None:
         super().__init__()
 
         self.layers = torch.nn.ModuleList([
-            torch.nn.TransformerEncoderLayer(config.emsize, config.nheads, config.nhid, config.dropout)
+            torch.nn.TransformerEncoderLayer(config.emsize, config.nheads, config.nhid, config.dropout, batch_first=True)
             if i % 2 == 0 else
             SwitchTransformerEncoderLayer(global_rank)
             # NaiveSwitchTransformerEncoderLayer()
@@ -95,26 +95,6 @@ class MoE(torch.nn.Module):
         for layer in self.layers:
             x = layer(x)
         return torch.sum(x)
-
-# from torch.profiler import profile, record_function, ProfilerActivity
-
-# with profile(
-#     activities= [ProfilerActivity.CPU, ProfilerActivity.CUDA],
-#     schedule= torch.profiler.schedule(wait=1, warmup=1, active=4)
-# ) as prof:
-#     for _ in range(6):
-#         with record_function("forward"):
-#             loss = model(rand_input)
-#         with record_function("backward"):
-#             loss.backward()
-#             torch.cuda.synchronize()
-#         with record_function("update"):
-#             optimizer.step()
-#         dist.barrier()
-#         prof.step()
-
-# if rank == 0:
-#     prof.export_chrome_trace("trace.json")
 
 def run(global_rank, local_rank):
     import torch.distributed as dist

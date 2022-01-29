@@ -28,18 +28,21 @@ class SwitchTransformerEncoderLayer(nn.Module):
     def __init__(self):
         super(SwitchTransformerEncoderLayer, self).__init__()
 
-        self.self_atten = torch.nn.MultiheadAttention(config.emsize, config.nheads, dropout=config.dropout)
+        self.self_atten = torch.nn.MultiheadAttention(config.emsize, config.nheads, dropout=config.dropout, batch_first=True)
 
         self.moe = deepspeed.moe.layer.MoE(
             hidden_size=config.emsize,
             expert=torch.nn.Sequential(
+                # LogShape(),
                 torch.nn.Linear(config.emsize, config.nhid),
+                torch.nn.ReLU(),
                 torch.nn.Linear(config.nhid, config.emsize),
             ),
-            num_experts=config.n_expert ,#// config.world_size,
+            num_experts=config.n_expert,
             k=1,
-            min_capacity=config.capacity,
-        noisy_gate_policy='RSample')
+            capacity_factor=config.capacity_factor,
+            noisy_gate_policy='RSample'
+        )
 
         self.norm1 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
         self.norm2 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
@@ -54,12 +57,19 @@ class SwitchTransformerEncoderLayer(nn.Module):
         x = self.self_atten(x, x, x, need_weights=False)[0]
         return self.dropout(x)
 
+class LogShape(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+    def forward(self, x):
+        print(x.shape)
+        return x
+
 class MoE(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
 
         self.layers = torch.nn.ModuleList([
-            torch.nn.TransformerEncoderLayer(config.emsize, config.nheads, config.nhid, config.dropout)
+            torch.nn.TransformerEncoderLayer(config.emsize, config.nheads, config.nhid, config.dropout, batch_first=True)
             if i % 2 == 0 else
             SwitchTransformerEncoderLayer()
             for i in range(config.nlayers)

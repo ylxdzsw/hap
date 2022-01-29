@@ -21,8 +21,8 @@ def run(global_rank, local_rank):
     annotate(model, config.input_shape())
     compile(model, load(f"strategy_{config.model_name}"), global_rank=global_rank, local_rank=local_rank, world_size=config.world_size)
 
-    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
+    optimizer = torch.optim.SGD(model.parameters(), lr=.1)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
 
     for epoch in range(config.epoch):
         total_loss = 0.
@@ -42,6 +42,8 @@ def run(global_rank, local_rank):
                     print(f"epoch {epoch:3d} | batch {batch:3d} | ppl {math.exp(avg_loss):02.2f} | ms/batch {elapsed*1000/config.log_iterval:5.2f}")
                 total_loss = 0.
                 start_time = time.time()
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
 
             loss.backward()
             optimizer.step()
