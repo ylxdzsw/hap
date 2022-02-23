@@ -181,3 +181,55 @@ def positional_encoding(seqlen, emsize):
     p[:, 0::2] = np.sin(p[:, 0::2])
     p[:, 1::2] = np.cos(p[:, 1::2])
     return p
+
+
+
+
+# class PatchEmbedding(nn.Module):
+#     """ 2D Image to Patch Embedding
+#     """
+#     def __init__(self,
+#                  img_size: int,
+#                  patch_size: int,
+#                  in_chans: int,
+#                  embed_size: int,
+#                  dtype: dtype = None,
+#                  flatten: bool = True,
+#                  weight_initializer: Callable = init.kaiming_uniform_(a=math.sqrt(5)),
+#                  bias_initializer: Callable = init.xavier_uniform_(a=1, scale=1),
+#                  position_embed_initializer: Callable = init.zeros_()):
+#         super().__init__()
+#         img_size = to_2tuple(img_size)
+#         patch_size = to_2tuple(patch_size)
+#         self.img_size = img_size
+#         self.patch_size = patch_size
+#         self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
+#         self.num_patches = self.grid_size[0] * self.grid_size[1]
+#         self.flatten = flatten
+
+#         self.weight = nn.Parameter(
+#             torch.empty((embed_size, in_chans, *self.patch_size), device=get_current_device(), dtype=dtype))
+#         self.bias = nn.Parameter(torch.empty(embed_size, device=get_current_device(), dtype=dtype))
+#         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_size))
+#         self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + 1, embed_size))
+
+#         self.reset_parameters(weight_initializer, bias_initializer, position_embed_initializer)
+
+#     def reset_parameters(self, weight_initializer, bias_initializer, position_embed_initializer):
+#         fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.weight)
+#         weight_initializer(self.weight, fan_in=fan_in, fan_out=fan_out)
+#         bias_initializer(self.bias, fan_in=fan_in)
+#         position_embed_initializer(self.pos_embed)
+
+#     def forward(self, input_: Tensor) -> Tensor:
+#         B, C, H, W = input_.shape
+#         assert H == self.img_size[0] and W == self.img_size[1], \
+#             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+#         output = F.conv2d(input_, self.weight, self.bias, stride=self.patch_size)
+#         if self.flatten:
+#             output = output.flatten(2).transpose(1, 2)  # BCHW -> BNC
+
+#         cls_token = self.cls_token.expand(output.shape[0], -1, -1)
+#         output = torch.cat((cls_token, output), dim=1)
+#         output = output + self.pos_embed
+#         return output

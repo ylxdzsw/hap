@@ -10,6 +10,15 @@ import operator
 import itertools
 import models
 
+# polyfill for old python
+if not hasattr(math, "prod"):
+    def prod(args):
+        result = 1
+        for a in args:
+            result *= a
+        return result
+    math.prod = prod
+
 def output_dims(node: torch.fx.node.Node):
     if node.meta.get('output_is_tuple'):
         raise Exception("TODO")

@@ -25,11 +25,26 @@ master_addr = "127.0.0.1"
 # master_addr = "10.28.1.27" # g12
 master_port = 39261
 
-trace = True
-# trace = False
+# trace = True
+trace = False
 
 epoch = 40
 log_iterval = 10
+
+profile_noise = 0
+# profile_noise = 0.8
+
+import os
+if os.environ.get("DLC") != None:
+    print(os.environ)
+    n_cards_per_worker = int(os.environ["DLC"])
+    world_size = n_cards_per_worker * int(os.environ["WORLD_SIZE"])
+    master_addr = os.environ["MASTER_ADDR"]
+    master_port = os.environ["MASTER_PORT"]
+    dlc_rank = os.environ["RANK"]
+    sys.argv.append(','.join(str(i + dlc_rank * n_cards_per_worker) for i in range(n_cards_per_worker)))
+    del os.environ["DLC"]
+    del os.environ["RANK"]
 
 def get_model(seed=None):
     from models import MLP, MLP2, Transformer, TransformerR, MoE
