@@ -2,6 +2,7 @@ import config
 
 import os
 import sys
+import datetime
 import time
 import torch
 import torch.distributed as dist
@@ -98,7 +99,7 @@ class MoE(torch.nn.Module):
 
 def run(global_rank, local_rank):
     import torch.distributed as dist
-    dist.init_process_group('nccl', rank=global_rank)
+    dist.init_process_group('nccl', rank=global_rank, timeout=datetime.timedelta(hours=2))
 
     torch.manual_seed(0)
     # torch.use_deterministic_algorithms(True)

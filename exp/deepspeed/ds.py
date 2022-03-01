@@ -1,13 +1,14 @@
 import config
 
 import os
+import datetime
 
 env = os.environ.copy()
 env["PATH"] = "/home/swzhang/miniconda3/envs/th19/bin:" + env["PATH"]
 os.environ.update(env)
 
 import deepspeed
-deepspeed.init_distributed()
+deepspeed.init_distributed(timeout=datetime.timedelta(hours=2))
 deepspeed.utils.groups.initialize(ep_size=config.world_size)
 
 import time

@@ -1,5 +1,6 @@
 import config
 import sys
+import datetime
 import torch
 import torch.fx
 from torch.profiler import profile, record_function, ProfilerActivity
@@ -10,7 +11,7 @@ from utils import *
 
 def run(global_rank, local_rank):
     import torch.distributed as dist
-    dist.init_process_group('nccl', rank=global_rank)
+    dist.init_process_group('nccl', rank=global_rank, timeout=datetime.timedelta(hours=2))
 
     model = symbolic_trace(config.get_model(seed=39)).cuda(local_rank)
     model = DDP(model, device_ids=[local_rank])

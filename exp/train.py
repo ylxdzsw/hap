@@ -1,5 +1,6 @@
 import config
 import sys
+import datetime
 import time
 import math
 import torch
@@ -12,7 +13,7 @@ from utils import *
 
 def run(global_rank, local_rank):
     import torch.distributed as dist
-    dist.init_process_group('nccl', rank=global_rank)
+    dist.init_process_group('nccl', rank=global_rank, timeout=datetime.timedelta(hours=2))
 
     # ntokens, train_data, test_data, valid_data = config.get_data()
     # train_data = train_data.cuda(local_rank)
