@@ -42,7 +42,8 @@ if os.environ.get("DLC") != None:
     master_addr = os.environ["MASTER_ADDR"]
     master_port = os.environ["MASTER_PORT"]
     dlc_rank = int(os.environ["RANK"])
-    if os.environ.get("NOARGV") != None:
+    print(master_addr, master_port, dlc_rank, world_size)
+    if os.environ.get("NOARGV") == None:
         sys.argv.append(','.join(str(i + dlc_rank * n_cards_per_worker) for i in range(n_cards_per_worker)))
     del os.environ["DLC"]
     del os.environ["RANK"]
@@ -87,9 +88,10 @@ profiler_data = {
     "n_devices": world_size,
 
     # "device_flops": 5603062517020, # V100 16G (g11), MLP
-    "device_flops": 3312996495566, # V100 16G (g11), MoE
+    # "device_flops": 3312996495566, # V100 16G (g11), MoE
     # "device_flops": 4468888991664, # 1080Ti (g10), MLP
     # "device_flops": 2218545605794, # 1080Ti (g10), MoE
+    "device_flops": 2474540597913, # A10 (DLC), MoE
 
     "all_gather": 7586351942, "all_reduce": 4681009156, "reduce_scatter": 7900003407, "all_to_all": 21875592969, # NVLink (g11)
     # "all_gather": 3502600835, "all_reduce": 1888718528, "reduce_scatter": 3722992647, "all_to_all": 9616962998, # g9 g10
