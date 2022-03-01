@@ -36,13 +36,14 @@ profile_noise = 0
 
 import os
 if os.environ.get("DLC") != None:
-    print(os.environ)
+    # print(os.environ)
     n_cards_per_worker = int(os.environ["DLC"])
     world_size = n_cards_per_worker * int(os.environ["WORLD_SIZE"])
     master_addr = os.environ["MASTER_ADDR"]
     master_port = os.environ["MASTER_PORT"]
-    dlc_rank = os.environ["RANK"]
-    sys.argv.append(','.join(str(i + dlc_rank * n_cards_per_worker) for i in range(n_cards_per_worker)))
+    dlc_rank = int(os.environ["RANK"])
+    if os.environ.get("NOARGV") != None:
+        sys.argv.append(','.join(str(i + dlc_rank * n_cards_per_worker) for i in range(n_cards_per_worker)))
     del os.environ["DLC"]
     del os.environ["RANK"]
 

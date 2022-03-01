@@ -15,8 +15,8 @@ def run(global_rank, local_rank):
     model = symbolic_trace(config.get_model(seed=39)).cuda(local_rank)
     model = DDP(model, device_ids=[local_rank])
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
     test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(local_rank) / 6
     test_input = test_input.chunk(config.world_size, 0)[global_rank]
 
