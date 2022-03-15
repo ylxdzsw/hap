@@ -34,20 +34,6 @@ log_iterval = 10
 profile_noise = 0
 # profile_noise = 0.8
 
-import os
-if os.environ.get("DLC") != None:
-    # print(os.environ)
-    n_cards_per_worker = int(os.environ["DLC"])
-    world_size = n_cards_per_worker * int(os.environ["WORLD_SIZE"])
-    master_addr = os.environ["MASTER_ADDR"]
-    master_port = os.environ["MASTER_PORT"]
-    dlc_rank = int(os.environ["RANK"])
-    print(master_addr, master_port, dlc_rank, world_size)
-    if os.environ.get("NOARGV") == None:
-        sys.argv.append(','.join(str(i + dlc_rank * n_cards_per_worker) for i in range(n_cards_per_worker)))
-    del os.environ["DLC"]
-    del os.environ["RANK"]
-
 def get_model(seed=None):
     from models import MLP, MLP2, Transformer, TransformerR, MoE
 

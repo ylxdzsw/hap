@@ -37,4 +37,4 @@
         "contiguous_gradients": true,
         "cpu_offload": false
     }
-  }
+}
