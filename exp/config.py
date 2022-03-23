@@ -8,10 +8,10 @@ sys.path.insert(1, f"{sys.path[0]}/../spmd")
 
 model_name = "moe"
 
-world_size = 8
+world_size = 32
 nlayers = 6
 n_expert = 4 * world_size
-batch_size = 16 * world_size
+batch_size = 32 * world_size
 seqlen = 256
 capacity_factor = 1.25
 capacity = math.floor(seqlen / n_expert * capacity_factor)
@@ -90,8 +90,8 @@ profiler_data = {
 
 
     # 'all_gather': 1629540629, 'all_reduce': 770636359, 'reduce_scatter': 1568092051, 'all_to_all': 5875506734, # four cards one per machine
-    'all_gather': 1444972440, 'all_reduce': 644687571, 'reduce_scatter': 1409464500, 'all_to_all': 9295475658, # 32 cards on 4 machines
-    # 'all_gather': 1138061790, 'all_reduce': 553212015, 'reduce_scatter': 1129505905, 'all_to_all': 10178889989, # 64 cards on 8 machines
+    # 'all_gather': 1444972440, 'all_reduce': 644687571, 'reduce_scatter': 1409464500, 'all_to_all': 9295475658, # 32 cards on 4 machines
+    'all_gather': 1138061790, 'all_reduce': 553212015, 'reduce_scatter': 1129505905, 'all_to_all': 10178889989, # 64 cards on 8 machines
 
     # "all_gather": 7586351942, "all_reduce": 4681009156, "reduce_scatter": 7900003407, "all_to_all": 21875592969, # NVLink (g11)
     # "all_gather": 3502600835, "all_reduce": 1888718528, "reduce_scatter": 3722992647, "all_to_all": 9616962998, # g9 g10

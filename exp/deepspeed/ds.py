@@ -86,16 +86,23 @@ model = MoE()
 model_engine, optimizer, _, __ = deepspeed.initialize(
     args=args, model=model, model_parameters=filter(lambda p: p.requires_grad, model.parameters()))
 
+result_times = []
+
 # optimizer = torch.optim.SGD(model.parameters(), lr=1e-8)
 rand_input = torch.rand(config.batch_size // config.world_size, config.seqlen, config.emsize).to(model_engine.local_rank) / 6
 
-for i in range(10):
+for i in range(100):
     start_time = time.time()
     loss = model_engine(rand_input)
     model_engine.backward(loss)
     # torch.cuda.synchronize()
     model_engine.step()
-    print(f"iter {i}, time {time.time() - start_time}s")
+    if model_engine.local_rank == 0:
+        print(f"iter {i}, time {time.time() - start_time}s")
+        result_times.append(time.time() - start_time)
+
+if model_engine.local_rank == 0:
+    print("avg:", sum(result_times[-50:]) / 50)
 
 if not config.trace:
     raise SystemExit

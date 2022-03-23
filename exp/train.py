@@ -25,8 +25,9 @@ def run(global_rank, local_rank):
     # optimizer = torch.optim.SGD(model.parameters(), lr=.1)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
 
+    result_times = []
     test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(local_rank) / 6
-    for iter in range(10):
+    for iter in range(100):
         with measure_time(f"iteration {iter}") as wall_time:
             loss = model(test_input)
             aggregated_loss = loss.detach().clone()
@@ -38,9 +39,13 @@ def run(global_rank, local_rank):
             loss.backward()
             # torch.cuda.synchronize()
             optimizer.step()
-            dist.barrier()
+            # dist.barrier()
         if local_rank == 0:
             print(wall_time)
+            result_times.append(wall_time.time)
+
+    if local_rank == 0:
+        print("avg:", sum(result_times[-50:]) / 50, flush=True)
 
     # for epoch in range(config.epoch):
     #     total_loss = 0.

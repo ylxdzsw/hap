@@ -112,7 +112,8 @@ def run(global_rank, local_rank):
     test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(local_rank) / 6
     test_input = test_input.chunk(config.world_size, 0)[global_rank]
 
-    for iter in range(10):
+    result_times = []
+    for iter in range(60): # Fastmoe getting slower and slower during training for unknown reason
         with measure_time(f"iteration {iter}") as wall_time:
             loss = model(test_input)
             aggregated_loss = loss.detach().clone()
@@ -124,9 +125,13 @@ def run(global_rank, local_rank):
             loss.backward()
             # torch.cuda.synchronize()
             optimizer.step()
-            dist.barrier()
+            # dist.barrier()
         if local_rank == 0:
             print(wall_time)
+            result_times.append(wall_time.time)
+
+    if local_rank == 0:
+        print("avg:", sum(result_times[-50:]) / 50)
 
     if not config.trace:
         return
