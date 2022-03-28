@@ -45,6 +45,9 @@ def run(global_rank, local_rank):
     if not config.trace:
         return
 
+    x, y = next(train_data)
+    x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+    y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
     with profile(
         activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
         # record_shapes = True,
@@ -53,7 +56,7 @@ def run(global_rank, local_rank):
     ) as prof:
         for _ in range(15):
             with record_function("forward"):
-                loss = model(test_input)
+                loss = model(x, y)
             with record_function("backward"):
                 loss.backward()
                 torch.cuda.synchronize()

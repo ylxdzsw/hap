@@ -12,7 +12,7 @@ world_size = 4
 nlayers = 4
 n_expert = 4 * world_size
 batch_size = 32 * world_size
-seqlen = 256
+seqlen = 64
 capacity_factor = 1.25
 capacity = math.floor(seqlen / n_expert * capacity_factor)
 emsize = 512
@@ -93,11 +93,12 @@ def wikitext2():
     return ntokens, train_data, test_data, valid_data
 
 def cifar10():
+    import torch
+    import torchvision
     def it(data):
         loader = torch.utils.data.DataLoader(data, batch_size=batch_size, drop_last=True)
         while True:
             yield from iter(loader)
-    import torchvision
     train_data = torchvision.datasets.CIFAR10(f"{sys.path[0]}/../cifar10", train=True, transform=torchvision.transforms.ToTensor())
     test_data = torchvision.datasets.CIFAR10(f"{sys.path[0]}/../cifar10", train=False, transform=torchvision.transforms.ToTensor())
     return 10, it(train_data), it(test_data)

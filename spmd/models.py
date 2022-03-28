@@ -84,6 +84,8 @@ class ViT(torch.nn.Module):
         self.emsize = emsize
         self.criterion = torch.nn.NLLLoss(reduction='sum')
 
+        assert seqlen == 8 * 8
+
         self.patch_embed = PatchEmbed((32, 32), (4, 4), embed_dim=emsize)
         self.cls_token = torch.nn.Parameter(torch.zeros(1, 1, emsize))
         self.pos_embed = torch.nn.Parameter(torch.zeros(1, seqlen + 1, emsize)) # seqlen patches + 1 cls token
@@ -94,13 +96,13 @@ class ViT(torch.nn.Module):
     def forward(self, x, y):
         # x: N, 3, 32, 32
         x = self.patch_embed(x)
-        x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        x = append_cls_token(x, self.cls_token)
         x = x + self.pos_embed
 
         for layer in self.layers:
             x = layer(x)
 
-        x = x[:, 0, :] # embedding of the class token
+        x = get_cls_token(x) # embedding of the class token
         x = self.decoder(x)
         x = torch.log_softmax(x, dim=-1)
         return self.criterion(x, y)
@@ -177,6 +179,14 @@ class SwitchTransformerEncoderLayer(torch.nn.Module):
 def switch_gating(gate_input, n_expert, capacity, gate_weight, train: bool = True):
     return _switch_gating(gate_input, n_expert, capacity, gate_weight, train)
 
+@torch.fx.wrap
+def append_cls_token(x, cls_token):
+    return torch.cat((cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+
+@torch.fx.wrap
+def get_cls_token(x):
+    return x[:, 0, :]
+
 # @torch.jit.script
 def _switch_gating(gate_input, n_expert: int, capacity: int, gate_weight, train: bool = True):
     gate_logits = torch.matmul(gate_input, gate_weight) # (batch, seq_len, n_expert)
@@ -213,7 +223,7 @@ def positional_encoding(seqlen, emsize):
 
 # https://github.com/rwightman/pytorch-image-models/blob/f670d98cb8ec70ed6e03b4be60a18faf4dc913b5/timm/models/layers/patch_embed.py#L15
 class PatchEmbed(torch.nn.Module):
-    def __init__(self, img_size=(224, 224), patch_size=(16, 16), in_chans=3, embed_dim=768, norm_layer=None):
+    def __init__(self, img_size=(224, 224), patch_size=(16, 16), in_chans=3, embed_dim=768):
         super().__init__()
         self.img_size = img_size
         self.patch_size = patch_size
@@ -221,13 +231,10 @@ class PatchEmbed(torch.nn.Module):
         self.num_patches = self.grid_size[0] * self.grid_size[1]
 
         self.proj = torch.nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.norm = norm_layer(embed_dim) if norm_layer else torch.nn.Identity()
 
     def forward(self, x):
-        print(x.shape, self.img_size)
         # B, C, H, W = x.shape
         # assert H == self.img_size[0] and W == self.img_size[1]
         x = self.proj(x)
         x = x.flatten(2).transpose(1, 2)  # BCHW -> BNC
-        x = self.norm(x)
         return x

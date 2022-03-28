@@ -112,8 +112,14 @@ def normalize_arguments(node: torch.fx.node.Node) -> dict[str]:
         return { 'self': node.args[0], **{ f"s{i}": arg for i, arg in enumerate(node.args[1:]) } }
     if node.target == models.switch_gating:
         return { 'gate_input': node.args[0], 'n_expert': node.args[1], 'capacity': node.args[2], 'gate_weight': node.args[3] }
+    if node.target == models.append_cls_token:
+        return { 'x': node.args[0], 'cls_token': node.args[1] }
+    if node.target == models.get_cls_token:
+        return { 'x': node.args[0] }
     if node.target == torch.einsum: # TODO
         return { 'code': node.args[0], 'x': node.args[1], 'y': node.args[2] }
+    if node.target == torch.nn.functional.conv2d: # TODO
+        return { 'input': node.args[0], 'weight': node.args[1], 'bias': node.args[2], 'stride': node.args[3] }
 
     raise Exception("don't know how to normalize node", node)
 
@@ -431,6 +437,34 @@ def annotate_switch_gating(node: torch.fx.node.Node):
 
     node.meta['flops'] = 10 * b * s * d * n_expert * capacity  # TODO: need to use profiling to infer this back, or carefully go through the logic
 
+@annotation_rule(models.append_cls_token)
+def annotate_append_cls_token(node: torch.fx.node.Node):
+    x_node, cls_token_node = node.meta['arg_dict']['x'], node.meta['arg_dict']['cls_token']
+
+    N, S, H = x_node.meta['output_shape']
+
+    node.meta['output_shape'] = (N, S+1, H)
+    node.meta['signatures'] = [
+        ({ 'x': 'gather_0', 'cls_token': 'full' }, 'gather_0'),
+        ({ 'x': 'gather_2', 'cls_token': 'gather_2' }, 'gather_2')
+    ]
+
+    node.meta['flops'] = N * H
+
+@annotation_rule(models.get_cls_token)
+def annotate_get_cls_token(node: torch.fx.node.Node):
+    x_node = node.meta['arg_dict']['x']
+
+    N, S, H = x_node.meta['output_shape']
+
+    node.meta['output_shape'] = (N, H)
+    node.meta['signatures'] = [
+        ({ 'x': 'gather_0' }, 'gather_0'),
+        ({ 'x': 'gather_2' }, 'gather_1')
+    ]
+
+    node.meta['flops'] = N * H
+
 @annotation_rule(torch.einsum)
 def annotate_einsum(node: torch.fx.node.Node):
     code, x, y = node.meta['arg_dict']['code'], node.meta['arg_dict']['x'], node.meta['arg_dict']['y']
@@ -571,7 +605,7 @@ def annotate_embedding(node: torch.fx.node.Node):
     T, E = weight_node.meta['output_shape']
 
     node.meta['output_shape'] = N, S, E
-    node.meta['flops'] = 0
+    node.meta['flops'] = N * S * E
     node.meta['signatures'] = [
         ({ 'input': 'gather_0', 'weight': 'full' }, 'gather_0'),
         ({ 'input': 'gather_1', 'weight': 'full' }, 'gather_1'),
@@ -595,3 +629,37 @@ def annotate_nll(node: torch.fx.node.Node):
     for i in range(n_extra_dims):
         node.meta['signatures'].append(({ 'input': f'gather_{i+2}', 'target': f'gather_{i+1}' }, 'reduce'))
     node.meta['flops'] = math.prod(input_node.meta['output_shape'])
+
+@annotation_rule(torch.nn.functional.conv2d)
+def annotate_conv2d(node: torch.fx.node.Node):
+    input_node = node.meta['arg_dict']['input']
+    weight_node = node.meta['arg_dict']['weight']
+    bias_node = node.meta['arg_dict']['bias']
+    sH, sW = node.meta['arg_dict']['stride']
+
+    N, C, H, W = input_node.meta['output_shape']
+    O, _C, kH, kW = weight_node.meta['output_shape']
+
+    assert kH == sH and kW == sW and H % sH == 0 and W % sW == 0
+
+    node.meta['output_shape'] = (N, O, H // sH, W // sW)
+    node.meta['signatures'] = [
+        ({ 'input': 'gather_0', 'weight': 'full', 'bias': 'full' }, 'gather_0'),
+        ({ 'input': 'full', 'weight': 'gather_0', 'bias': 'gather_0' }, 'gather_1'),
+    ]
+    node.meta['flops'] = 3 * N * C * O * H * W
+
+@annotation_rule(torch.flatten)
+@annotation_rule(torch.Tensor.flatten)
+def annotate_flatten(node: torch.fx.node.Node):
+    input_node = node.meta['arg_dict']['input']
+    start_dim = node.meta['arg_dict']['start_dim']
+    end_dim = node.meta['arg_dict']['end_dim']
+
+    assert end_dim == -1
+
+    input_shape = input_node.meta['output_shape']
+
+    node.meta['output_shape'] = (*input_shape[:start_dim], math.prod(input_shape[start_dim:]))
+    node.meta['signatures'] = [({ 'input': f"gather_{i}" }, f"gather_{i}") for i in range(start_dim)]
+    node.meta['flops'] = math.prod(input_shape)
