@@ -14,7 +14,7 @@ class MLP(torch.nn.Module):
             modlist.append(torch.nn.Sigmoid())
         self.layers = torch.nn.ModuleList(modlist)
 
-    def forward(self, x):
+    def forward(self, x, y=None):
         for layer in self.layers:
             x = layer(x)
         return torch.sum(x)
@@ -24,7 +24,7 @@ class MLP2(torch.nn.Module):
         super().__init__()
         self.layers = torch.nn.ModuleList([torch.nn.Linear(nhid, nhid) for _ in range(nlayers)])
 
-    def forward(self, x):
+    def forward(self, x, y=None):
         for layer in self.layers:
             x = layer(x)
             x = torch.bmm(x, x)
@@ -36,7 +36,7 @@ class Transformer(torch.nn.Module):
         super().__init__()
         self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
 
-    def forward(self, x):
+    def forward(self, x, y=None):
         for layer in self.layers:
             x = layer(x)
         return torch.sum(x)
@@ -51,7 +51,7 @@ class MoE(torch.nn.Module):
             for i in range(nlayers)
         ])
 
-    def forward(self, x):
+    def forward(self, x, y=None):
         for layer in self.layers:
             x = layer(x)
         return torch.sum(x)
@@ -77,6 +77,34 @@ class TransformerR(torch.nn.Module):
         x = self.decoder(x)
         x = torch.log_softmax(x, dim=-1)
         return self.criterion(x.transpose(1, 2), y) # the input to NLL loss is (N, C, ...), so we move the class prediction to the second dimension
+
+class ViT(torch.nn.Module):
+    def __init__(self, nclasses, seqlen, emsize=2048, nhead=4, nhid=2048, dropout=0.2, nlayers=2):
+        super().__init__()
+        self.emsize = emsize
+        self.criterion = torch.nn.NLLLoss(reduction='sum')
+
+        self.patch_embed = PatchEmbed((32, 32), (4, 4), embed_dim=emsize)
+        self.cls_token = torch.nn.Parameter(torch.zeros(1, 1, emsize))
+        self.pos_embed = torch.nn.Parameter(torch.zeros(1, seqlen + 1, emsize)) # seqlen patches + 1 cls token
+
+        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
+        self.decoder = torch.nn.Linear(emsize, nclasses)
+
+    def forward(self, x, y):
+        # x: N, 3, 32, 32
+        x = self.patch_embed(x)
+        x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        x = x + self.pos_embed
+
+        for layer in self.layers:
+            x = layer(x)
+
+        x = x[:, 0, :] # embedding of the class token
+        x = self.decoder(x)
+        x = torch.log_softmax(x, dim=-1)
+        return self.criterion(x, y)
+
 
 class SwitchTransformerEncoderLayer(torch.nn.Module):
     def __init__(self, d_model, nhead, d_hidden=2048, dropout=0.1, activation=F.relu,
@@ -183,53 +211,23 @@ def positional_encoding(seqlen, emsize):
     return p
 
 
+# https://github.com/rwightman/pytorch-image-models/blob/f670d98cb8ec70ed6e03b4be60a18faf4dc913b5/timm/models/layers/patch_embed.py#L15
+class PatchEmbed(torch.nn.Module):
+    def __init__(self, img_size=(224, 224), patch_size=(16, 16), in_chans=3, embed_dim=768, norm_layer=None):
+        super().__init__()
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
+        self.num_patches = self.grid_size[0] * self.grid_size[1]
 
+        self.proj = torch.nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.norm = norm_layer(embed_dim) if norm_layer else torch.nn.Identity()
 
-# class PatchEmbedding(nn.Module):
-#     """ 2D Image to Patch Embedding
-#     """
-#     def __init__(self,
-#                  img_size: int,
-#                  patch_size: int,
-#                  in_chans: int,
-#                  embed_size: int,
-#                  dtype: dtype = None,
-#                  flatten: bool = True,
-#                  weight_initializer: Callable = init.kaiming_uniform_(a=math.sqrt(5)),
-#                  bias_initializer: Callable = init.xavier_uniform_(a=1, scale=1),
-#                  position_embed_initializer: Callable = init.zeros_()):
-#         super().__init__()
-#         img_size = to_2tuple(img_size)
-#         patch_size = to_2tuple(patch_size)
-#         self.img_size = img_size
-#         self.patch_size = patch_size
-#         self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
-#         self.num_patches = self.grid_size[0] * self.grid_size[1]
-#         self.flatten = flatten
-
-#         self.weight = nn.Parameter(
-#             torch.empty((embed_size, in_chans, *self.patch_size), device=get_current_device(), dtype=dtype))
-#         self.bias = nn.Parameter(torch.empty(embed_size, device=get_current_device(), dtype=dtype))
-#         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_size))
-#         self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + 1, embed_size))
-
-#         self.reset_parameters(weight_initializer, bias_initializer, position_embed_initializer)
-
-#     def reset_parameters(self, weight_initializer, bias_initializer, position_embed_initializer):
-#         fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.weight)
-#         weight_initializer(self.weight, fan_in=fan_in, fan_out=fan_out)
-#         bias_initializer(self.bias, fan_in=fan_in)
-#         position_embed_initializer(self.pos_embed)
-
-#     def forward(self, input_: Tensor) -> Tensor:
-#         B, C, H, W = input_.shape
-#         assert H == self.img_size[0] and W == self.img_size[1], \
-#             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-#         output = F.conv2d(input_, self.weight, self.bias, stride=self.patch_size)
-#         if self.flatten:
-#             output = output.flatten(2).transpose(1, 2)  # BCHW -> BNC
-
-#         cls_token = self.cls_token.expand(output.shape[0], -1, -1)
-#         output = torch.cat((cls_token, output), dim=1)
-#         output = output + self.pos_embed
-#         return output
+    def forward(self, x):
+        print(x.shape, self.img_size)
+        # B, C, H, W = x.shape
+        # assert H == self.img_size[0] and W == self.img_size[1]
+        x = self.proj(x)
+        x = x.flatten(2).transpose(1, 2)  # BCHW -> BNC
+        x = self.norm(x)
+        return x

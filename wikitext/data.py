@@ -51,3 +51,10 @@ def batchify(data, bsz):
     data = data.narrow(0, 0, nbatch * bsz)
     data = data.view(bsz, -1).contiguous()
     return data
+
+def segmentify(data, seqlen):
+    while True:
+        for offset in range(0, data.size(1) - seqlen, seqlen):
+            x = data[:, offset:offset+seqlen]
+            y = data[:, offset+1:offset+1+seqlen]
+            yield x, y

@@ -18,13 +18,15 @@ def run(global_rank, local_rank):
 
     # optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
-    test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(local_rank) / 6
-    test_input = test_input.chunk(config.world_size, 0)[global_rank]
+    train_data = config.get_data()[1]
 
     result_times = []
     for iter in range(100):
         with measure_time(f"iteration {iter}") as wall_time:
-            loss = model(test_input)
+            x, y = next(train_data)
+            x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+            y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+            loss = model(x, y)
             aggregated_loss = loss.detach().clone() * config.world_size # not sure why we need this but the loss seems to be smaller than expected?
             dist.reduce(aggregated_loss, 0)
             if global_rank == 0:
@@ -38,9 +40,7 @@ def run(global_rank, local_rank):
         if local_rank == 0:
             print(wall_time)
             result_times.append(wall_time.time)
-
-    if local_rank == 0:
-        print("avg:", sum(result_times[-50:]) / 50)
+            print("avg:", sum(result_times[-50:]) / len(result_times[-50:]))
 
     if not config.trace:
         return

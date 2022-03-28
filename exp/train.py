@@ -43,9 +43,7 @@ def run(global_rank, local_rank):
         if local_rank == 0:
             print(wall_time)
             result_times.append(wall_time.time)
-
-    if local_rank == 0:
-        print("avg:", sum(result_times[-50:]) / 50, flush=True)
+            print("avg:", sum(result_times[-50:]) / len(result_times[-50:]))
 
     # for epoch in range(config.epoch):
     #     total_loss = 0.

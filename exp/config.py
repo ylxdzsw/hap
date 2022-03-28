@@ -6,10 +6,10 @@ if sys.path[0] == "":
     sys.path[0] = "."
 sys.path.insert(1, f"{sys.path[0]}/../spmd")
 
-model_name = "moe"
+model_name = "vit"
 
-world_size = 32
-nlayers = 6
+world_size = 4
+nlayers = 4
 n_expert = 4 * world_size
 batch_size = 32 * world_size
 seqlen = 256
@@ -36,14 +36,14 @@ log_iterval = 10
 profile_noise = 0
 # profile_noise = 0.8
 
-if os.environ.get("ALI", "") != "":
-    ranks_per_card = int(os.environ["ALI"])
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, range(ranks_per_card)))
-    offset = int(os.environ["NODERANK"]) * ranks_per_card
-    sys.argv.append(",".join(str(offset + i) for i in range(ranks_per_card)))
+if os.environ.get("CPN", "") != "":
+    cards_per_node = int(os.environ["CPN"])
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, range(cards_per_node)))
+    offset = int(os.environ["NODERANK"]) * cards_per_node
+    sys.argv.append(",".join(str(offset + i) for i in range(cards_per_node)))
 
 def get_model(seed=None):
-    from models import MLP, MLP2, Transformer, TransformerR, MoE
+    from models import MLP, MLP2, Transformer, TransformerR, MoE, ViT
 
     if seed is not None:
         import torch
@@ -62,21 +62,52 @@ def get_model(seed=None):
         ntokens, *_ = get_data()
         return TransformerR(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
 
+    if model_name == 'vit':
+        nclasses, *_ = get_data()
+        return ViT(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
+
 def get_data():
+    if model_name == 'transformerR':
+        return wikitext2()
+
+    if model_name == 'vit':
+        return cifar10()
+
+    else:
+        import torch
+        x = torch.rand(batch_size, seqlen, emsize) / 6
+        y = torch.rand(batch_size)
+        def rep():
+            while True:
+                yield x, y
+        return 0, rep()
+
+def wikitext2():
     sys.path.insert(1, f"{sys.path[0]}/../wikitext")
     import data
     corpus = data.Corpus(f"{sys.path[0]}/../wikitext")
-    train_data = data.batchify(corpus.train, batch_size)
-    test_data = data.batchify(corpus.test, batch_size)
-    valid_data = data.batchify(corpus.valid, batch_size)
+    train_data = data.segmentify(data.batchify(corpus.train, batch_size), seqlen)
+    test_data = data.segmentify(data.batchify(corpus.test, batch_size), seqlen)
+    valid_data = data.segmentify(data.batchify(corpus.valid, batch_size), seqlen)
     ntokens = world_size * (len(corpus.dictionary) // world_size + 1) # we have to ensure that it is dividable
     return ntokens, train_data, test_data, valid_data
+
+def cifar10():
+    def it(data):
+        loader = torch.utils.data.DataLoader(data, batch_size=batch_size, drop_last=True)
+        while True:
+            yield from iter(loader)
+    import torchvision
+    train_data = torchvision.datasets.CIFAR10(f"{sys.path[0]}/../cifar10", train=True, transform=torchvision.transforms.ToTensor())
+    test_data = torchvision.datasets.CIFAR10(f"{sys.path[0]}/../cifar10", train=False, transform=torchvision.transforms.ToTensor())
+    return 10, it(train_data), it(test_data)
 
 def input_shape():
     if model_name.endswith('R'):
         return { 'x': (batch_size, seqlen), 'y': (batch_size, seqlen) }
-    else:
-        return { 'x': (batch_size, seqlen, emsize) }
+    if 'vit' in model_name:
+        return { 'x': (batch_size, 3, 32, 32), 'y': (batch_size,) }
+    return { 'x': (batch_size, seqlen, emsize), 'y': (batch_size,) }
 
 profiler_data = {
     "n_devices": world_size,

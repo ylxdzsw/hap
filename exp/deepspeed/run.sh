@@ -1,9 +1,9 @@
 cd "${BASH_SOURCE%/*}"
 
-WORLDINFO=$(python -c 'import config;import json;print(json.dumps({f"{i}": [*range(config.ranks_per_card)] for i in range(config.world_size//config.ranks_per_card)}))')
+WORLDINFO=$(python -c 'import config;import json;print(json.dumps({f"{i}": [*range(config.cards_per_node)] for i in range(config.world_size//config.cards_per_node)}))')
 echo $WORLDINFO
 
-unset ALI
+unset CPN
 
 python -u -m deepspeed.launcher.launch \
     --world_info="$(base64 <<< "$WORLDINFO")" \

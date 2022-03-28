@@ -100,9 +100,7 @@ for i in range(100):
     if model_engine.local_rank == 0:
         print(f"iter {i}, time {time.time() - start_time}s")
         result_times.append(time.time() - start_time)
-
-if model_engine.local_rank == 0:
-    print("avg:", sum(result_times[-50:]) / 50)
+        print("avg:", sum(result_times[-50:]) / len(result_times[-50:]))
 
 if not config.trace:
     raise SystemExit

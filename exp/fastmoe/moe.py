@@ -113,7 +113,7 @@ def run(global_rank, local_rank):
     test_input = test_input.chunk(config.world_size, 0)[global_rank]
 
     result_times = []
-    for iter in range(60): # Fastmoe getting slower and slower during training for unknown reason
+    for iter in range(100): # Fastmoe getting slower and slower during training for unknown reason
         with measure_time(f"iteration {iter}") as wall_time:
             loss = model(test_input)
             aggregated_loss = loss.detach().clone()
@@ -129,9 +129,7 @@ def run(global_rank, local_rank):
         if local_rank == 0:
             print(wall_time)
             result_times.append(wall_time.time)
-
-    if local_rank == 0:
-        print("avg:", sum(result_times[-50:]) / 50)
+            print("avg:", sum(result_times[-50:]) / len(result_times[-50:]))
 
     if not config.trace:
         return
