@@ -92,7 +92,7 @@ class MoE(torch.nn.Module):
             for i in range(config.nlayers)
         ])
 
-    def forward(self, x):
+    def forward(self, x, y):
         for layer in self.layers:
             x = layer(x)
         return torch.sum(x)
@@ -107,15 +107,16 @@ def run(global_rank, local_rank):
     model = MoE(global_rank).to(local_rank)
     model = fmoe.DistributedGroupedDataParallel(model)
 
-    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
-    test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(local_rank) / 6
-    test_input = test_input.chunk(config.world_size, 0)[global_rank]
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+    train_data = config.get_data()[1]
 
     result_times = []
     for iter in range(100): # Fastmoe getting slower and slower during training for unknown reason
+        x, y = next(train_data)
+        x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+        y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
         with measure_time(f"iteration {iter}") as wall_time:
-            loss = model(test_input)
+            loss = model(x, y)
             aggregated_loss = loss.detach().clone()
             dist.reduce(aggregated_loss, 0)
             if global_rank == 0:
@@ -134,6 +135,9 @@ def run(global_rank, local_rank):
     if not config.trace:
         return
 
+    x, y = next(train_data)
+    x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+    y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
     with profile(
         activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
         # record_shapes = True,
@@ -142,7 +146,7 @@ def run(global_rank, local_rank):
     ) as prof:
         for _ in range(15):
             with record_function("forward"):
-                loss = model(test_input)
+                loss = model(x, y)
             with record_function("backward"):
                 loss.backward()
                 torch.cuda.synchronize()

@@ -6,11 +6,11 @@ if sys.path[0] == "":
     sys.path[0] = "."
 sys.path.insert(1, f"{sys.path[0]}/../spmd")
 
-model_name = "vit"
+model_name = "moe"
 
 world_size = 4
-nlayers = 4
-n_expert = 4 * world_size
+nlayers = 12
+n_expert = 2 * world_size
 batch_size = 32 * world_size
 seqlen = 64
 capacity_factor = 1.25
@@ -35,6 +35,8 @@ log_iterval = 10
 
 profile_noise = 0
 # profile_noise = 0.8
+
+lr = 1e-3
 
 if os.environ.get("CPN", "") != "":
     cards_per_node = int(os.environ["CPN"])

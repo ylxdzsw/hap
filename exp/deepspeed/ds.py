@@ -17,7 +17,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 import argparse
-parser = argparse.ArgumentParser(description='fuk')
+parser = argparse.ArgumentParser(description='asd')
 parser.add_argument('--local_rank',
                     type=int,
                     default=-1,
@@ -76,9 +76,9 @@ class MoE(torch.nn.Module):
             for i in range(config.nlayers)
         ])
 
-    def forward(self, x):
+    def forward(self, x, y):
         for layer in self.layers:
-            x=  layer(x)
+            x = layer(x)
         return torch.sum(x)
 
 model = MoE()
@@ -88,12 +88,14 @@ model_engine, optimizer, _, __ = deepspeed.initialize(
 
 result_times = []
 
-# optimizer = torch.optim.SGD(model.parameters(), lr=1e-8)
-rand_input = torch.rand(config.batch_size // config.world_size, config.seqlen, config.emsize).to(model_engine.local_rank) / 6
+train_data = config.get_data()[1]
 
 for i in range(100):
+    x, y = next(train_data)
+    x = x.chunk(config.world_size, 0)[dist.get_rank()].cuda(model_engine.local_rank)
+    y = y.chunk(config.world_size, 0)[dist.get_rank()].cuda(model_engine.local_rank)
     start_time = time.time()
-    loss = model_engine(rand_input)
+    loss = model_engine(x, y)
     model_engine.backward(loss)
     # torch.cuda.synchronize()
     model_engine.step()
@@ -107,13 +109,16 @@ if not config.trace:
 
 from torch.profiler import profile, record_function, ProfilerActivity
 
+x, y = next(train_data)
+x = x.chunk(config.world_size, 0)[dist.get_rank()].cuda(model_engine.local_rank)
+y = y.chunk(config.world_size, 0)[dist.get_rank()].cuda(model_engine.local_rank)
 with profile(
     activities= [ProfilerActivity.CPU, ProfilerActivity.CUDA],
     schedule = torch.profiler.schedule(wait=1, warmup=10, active=4)
 ) as prof:
     for _ in range(15):
         with record_function("forward"):
-            loss = model_engine(rand_input)
+            loss = model_engine(x, y)
         with record_function("backward"):
             model_engine.backward(loss)
             # torch.cuda.synchronize()
@@ -125,4 +130,4 @@ with profile(
 if model_engine.local_rank == 0:
     prof.export_chrome_trace("trace.json")
 
-print(model(rand_input))
+print(model(x, y))

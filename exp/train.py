@@ -15,21 +15,20 @@ def run(global_rank, local_rank):
     import torch.distributed as dist
     dist.init_process_group('nccl', rank=global_rank, timeout=datetime.timedelta(hours=2))
 
-    # ntokens, train_data, test_data, valid_data = config.get_data()
-    # train_data = train_data.cuda(local_rank)
-
     model = symbolic_trace(config.get_model(seed=39)).cuda(local_rank)
     annotate(model, config.input_shape())
     compile(model, load(f"strategy_{config.model_name}"), global_rank=global_rank, local_rank=local_rank, world_size=config.world_size)
 
-    # optimizer = torch.optim.SGD(model.parameters(), lr=.1)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+    train_data = config.get_data()[1]
 
     result_times = []
-    test_input = torch.rand(config.batch_size, config.seqlen, config.emsize).cuda(local_rank) / 6
     for iter in range(100):
+        x, y = next(train_data)
+        x = x.cuda(local_rank)
+        y = y.cuda(local_rank)
         with measure_time(f"iteration {iter}") as wall_time:
-            loss = model(test_input)
+            loss = model(x, y)
             aggregated_loss = loss.detach().clone()
             dist.reduce(aggregated_loss, 0)
             if global_rank == 0:
@@ -72,6 +71,9 @@ def run(global_rank, local_rank):
     if not config.trace:
         return
 
+    x, y = next(train_data)
+    x = x.cuda(local_rank)
+    y = y.cuda(local_rank)
     with profile(
         activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
         # record_shapes = True,
@@ -80,7 +82,7 @@ def run(global_rank, local_rank):
     ) as prof:
         for _ in range(15):
             with record_function("forward"):
-                loss = model(test_input)
+                loss = model(x, y)
             with record_function("backward"):
                 loss.backward()
                 torch.cuda.synchronize()

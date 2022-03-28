@@ -16,16 +16,16 @@ def run(global_rank, local_rank):
     model = symbolic_trace(config.get_model(seed=39)).cuda(local_rank)
     model = DDP(model, device_ids=[local_rank])
 
-    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-6)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=config.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
     train_data = config.get_data()[1]
 
     result_times = []
     for iter in range(100):
+        x, y = next(train_data)
+        x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+        y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
         with measure_time(f"iteration {iter}") as wall_time:
-            x, y = next(train_data)
-            x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
-            y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
             loss = model(x, y)
             aggregated_loss = loss.detach().clone() * config.world_size # not sure why we need this but the loss seems to be smaller than expected?
             dist.reduce(aggregated_loss, 0)
