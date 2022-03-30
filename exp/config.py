@@ -5,13 +5,15 @@ import math
 rootpath = "/root/spmd"
 sys.path.insert(1, f"{rootpath}/spmd")
 
-model_name = "Rmoe"
+model_name = "Vswitch"
 
-world_size = 8
+world_size = 64
 nlayers = 12
 n_expert = 2 * world_size
 batch_size = 32 * world_size
-seqlen = 64 # 64 for vit, 128 for bert
+seqlen = 128
+if model_name.startswith('V'):
+    seqlen = 64
 capacity_factor = 1.25
 capacity = math.floor(seqlen / n_expert * capacity_factor)
 if model_name.endswith('moe'):
@@ -57,29 +59,29 @@ def get_model(seed=None):
     if model_name == 'Tmlp2':
         return models.TMLP2(nhid=emsize, nlayers=nlayers)
     if model_name == 'Ttransformer':
-        return models.TTransformer(emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
+        return models.TTransformer(emsize=emsize, nheads=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
     if model_name == 'Tmoe':
-        return models.TMoE(emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
+        return models.TMoE(emsize=emsize, nheads=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
 
     if model_name == 'Rtransformer':
         ntokens, *_ = get_data()
-        return models.RTransformer(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
+        return models.RTransformer(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nheads=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
     if model_name == 'Rmoe':
         ntokens, *_ = get_data()
-        return models.RMoE(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
+        return models.RMoE(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nheads=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
     if model_name == 'Rswitch':
         ntokens, *_ = get_data()
-        return models.RSwitch(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
+        return models.RSwitch(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nheads=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
 
     if model_name == 'Vtransformer':
         nclasses, *_ = get_data()
-        return models.VRransformer(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
+        return models.VRransformer(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nheads=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
     if model_name == 'Vmoe':
         nclasses, *_ = get_data()
-        return models.VMoE(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
+        return models.VMoE(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nheads=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
     if model_name == 'Vswitch':
         nclasses, *_ = get_data()
-        return models.VSwitch(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
+        return models.VSwitch(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nheads=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
 
 
 def get_data():

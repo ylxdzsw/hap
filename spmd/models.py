@@ -32,9 +32,9 @@ class TMLP2(torch.nn.Module):
         return torch.sum(x)
 
 class TTransformer(torch.nn.Module):
-    def __init__(self, emsize=2048, nhead=4, nhid=2048, dropout=0.2, nlayers=2):
+    def __init__(self, emsize=2048, nheads=4, nhid=2048, dropout=0.2, nlayers=2):
         super().__init__()
-        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
+        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nheads, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
 
     def forward(self, x, y=None):
         for layer in self.layers:
@@ -42,12 +42,12 @@ class TTransformer(torch.nn.Module):
         return torch.sum(x)
 
 class TMoE(torch.nn.Module):
-    def __init__(self, emsize, nhead, nhid, dropout, n_expert, capacity, nlayers=2): # capacity should be seq_len / n_expert * factor
+    def __init__(self, emsize, nheads, nhid, dropout, n_expert, capacity, nlayers=2): # capacity should be seq_len / n_expert * factor
         super().__init__()
         self.layers = torch.nn.ModuleList([
-            torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True)
+            torch.nn.TransformerEncoderLayer(emsize, nheads, nhid, dropout, batch_first=True)
             if i % 2 == 0 else
-            Top2TransformerEncoderLayer(emsize, nhead, nhid, dropout, n_expert=n_expert, capacity=capacity)
+            Top2TransformerEncoderLayer(emsize, nheads, nhid, dropout, n_expert=n_expert, capacity=capacity)
             for i in range(nlayers)
         ])
 
@@ -57,7 +57,7 @@ class TMoE(torch.nn.Module):
         return torch.sum(x)
 
 class RTransformer(torch.nn.Module):
-    def __init__(self, ntokens, seqlen, emsize=2048, nhead=4, nhid=2048, dropout=0.2, nlayers=2):
+    def __init__(self, ntokens, seqlen, emsize=2048, nheads=4, nhid=2048, dropout=0.2, nlayers=2):
         super().__init__()
         self.emsize = emsize
         self.criterion = torch.nn.NLLLoss(reduction='sum')
@@ -65,7 +65,7 @@ class RTransformer(torch.nn.Module):
         # self.pe_dropout = torch.nn.Dropout(dropout)
         self.register_buffer('src_mask', torch.triu(torch.full((seqlen, seqlen), float('-inf')), diagonal=1))
         self.encoder = torch.nn.Embedding(ntokens, emsize)
-        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
+        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nheads, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
         self.decoder = torch.nn.Linear(emsize, ntokens)
 
     def forward(self, x, y):
@@ -79,7 +79,7 @@ class RTransformer(torch.nn.Module):
         return self.criterion(x.transpose(1, 2), y) # the input to NLL loss is (N, C, ...), so we move the class prediction to the second dimension
 
 class RMoE(torch.nn.Module):
-    def __init__(self, ntokens, seqlen, emsize, nhead, nhid, dropout, n_expert, capacity, nlayers):
+    def __init__(self, ntokens, seqlen, emsize, nheads, nhid, dropout, n_expert, capacity, nlayers):
         super().__init__()
         self.emsize = emsize
         self.criterion = torch.nn.NLLLoss(reduction='sum')
@@ -88,9 +88,9 @@ class RMoE(torch.nn.Module):
         self.register_buffer('src_mask', torch.triu(torch.full((seqlen, seqlen), float('-inf')), diagonal=1))
         self.encoder = torch.nn.Embedding(ntokens, emsize)
         self.layers = torch.nn.ModuleList([
-            torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True)
+            torch.nn.TransformerEncoderLayer(emsize, nheads, nhid, dropout, batch_first=True)
             if i % 2 == 0 else
-            Top2TransformerEncoderLayer(emsize, nhead, nhid, dropout, n_expert=n_expert, capacity=capacity)
+            Top2TransformerEncoderLayer(emsize, nheads, nhid, dropout, n_expert=n_expert, capacity=capacity)
             for i in range(nlayers)
         ])
         self.decoder = torch.nn.Linear(emsize, ntokens)
@@ -106,7 +106,7 @@ class RMoE(torch.nn.Module):
         return self.criterion(x.transpose(1, 2), y) # the input to NLL loss is (N, C, ...), so we move the class prediction to the second dimension
 
 class RSwitch(torch.nn.Module):
-    def __init__(self, ntokens, seqlen, emsize, nhead, nhid, dropout, n_expert, capacity, nlayers):
+    def __init__(self, ntokens, seqlen, emsize, nheads, nhid, dropout, n_expert, capacity, nlayers):
         super().__init__()
         self.emsize = emsize
         self.criterion = torch.nn.NLLLoss(reduction='sum')
@@ -115,9 +115,9 @@ class RSwitch(torch.nn.Module):
         self.register_buffer('src_mask', torch.triu(torch.full((seqlen, seqlen), float('-inf')), diagonal=1))
         self.encoder = torch.nn.Embedding(ntokens, emsize)
         self.layers = torch.nn.ModuleList([
-            torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True)
+            torch.nn.TransformerEncoderLayer(emsize, nheads, nhid, dropout, batch_first=True)
             if i % 2 == 0 else
-            SwitchTransformerEncoderLayer(emsize, nhead, nhid, dropout, n_expert=n_expert, capacity=capacity)
+            SwitchTransformerEncoderLayer(emsize, nheads, nhid, dropout, n_expert=n_expert, capacity=capacity)
             for i in range(nlayers)
         ])
         self.decoder = torch.nn.Linear(emsize, ntokens)
@@ -133,7 +133,7 @@ class RSwitch(torch.nn.Module):
         return self.criterion(x.transpose(1, 2), y) # the input to NLL loss is (N, C, ...), so we move the class prediction to the second dimension
 
 class VTransformer(torch.nn.Module):
-    def __init__(self, nclasses, seqlen, emsize=2048, nhead=4, nhid=2048, dropout=0.2, nlayers=2):
+    def __init__(self, nclasses, seqlen, emsize=2048, nheads=4, nhid=2048, dropout=0.2, nlayers=2):
         super().__init__()
         self.emsize = emsize
         self.criterion = torch.nn.NLLLoss(reduction='sum')
@@ -144,7 +144,7 @@ class VTransformer(torch.nn.Module):
         self.cls_token = torch.nn.Parameter(torch.zeros(1, 1, emsize))
         self.pos_embed = torch.nn.Parameter(torch.zeros(1, seqlen + 1, emsize)) # seqlen patches + 1 cls token
 
-        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
+        self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nheads, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
         self.decoder = torch.nn.Linear(emsize, nclasses)
 
     def forward(self, x, y):
@@ -162,7 +162,7 @@ class VTransformer(torch.nn.Module):
         return self.criterion(x, y)
 
 class VMoE(torch.nn.Module):
-    def __init__(self, nclasses, seqlen, emsize, nhead, nhid, dropout, n_expert, capacity, nlayers):
+    def __init__(self, nclasses, seqlen, emsize, nheads, nhid, dropout, n_expert, capacity, nlayers):
         super().__init__()
         self.emsize = emsize
         self.criterion = torch.nn.NLLLoss(reduction='sum')
@@ -174,9 +174,9 @@ class VMoE(torch.nn.Module):
         self.pos_embed = torch.nn.Parameter(torch.zeros(1, seqlen + 1, emsize)) # seqlen patches + 1 cls token
 
         self.layers = torch.nn.ModuleList([
-            torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True)
+            torch.nn.TransformerEncoderLayer(emsize, nheads, nhid, dropout, batch_first=True)
             if i % 2 == 0 else
-            Top2TransformerEncoderLayer(emsize, nhead, nhid, dropout, n_expert=n_expert, capacity=capacity)
+            Top2TransformerEncoderLayer(emsize, nheads, nhid, dropout, n_expert=n_expert, capacity=capacity)
             for i in range(nlayers)
         ])
         self.decoder = torch.nn.Linear(emsize, nclasses)
@@ -196,7 +196,7 @@ class VMoE(torch.nn.Module):
         return self.criterion(x, y)
 
 class VSwitch(torch.nn.Module):
-    def __init__(self, nclasses, seqlen, emsize, nhead, nhid, dropout, n_expert, capacity, nlayers):
+    def __init__(self, nclasses, seqlen, emsize, nheads, nhid, dropout, n_expert, capacity, nlayers):
         super().__init__()
         self.emsize = emsize
         self.criterion = torch.nn.NLLLoss(reduction='sum')
@@ -208,9 +208,9 @@ class VSwitch(torch.nn.Module):
         self.pos_embed = torch.nn.Parameter(torch.zeros(1, seqlen + 1, emsize)) # seqlen patches + 1 cls token
 
         self.layers = torch.nn.ModuleList([
-            torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True)
+            torch.nn.TransformerEncoderLayer(emsize, nheads, nhid, dropout, batch_first=True)
             if i % 2 == 0 else
-            SwitchTransformerEncoderLayer(emsize, nhead, nhid, dropout, n_expert=n_expert, capacity=capacity)
+            SwitchTransformerEncoderLayer(emsize, nheads, nhid, dropout, n_expert=n_expert, capacity=capacity)
             for i in range(nlayers)
         ])
         self.decoder = torch.nn.Linear(emsize, nclasses)
@@ -231,11 +231,11 @@ class VSwitch(torch.nn.Module):
 
 
 class Top2TransformerEncoderLayer(torch.nn.Module):
-    def __init__(self, d_model, nhead, d_hidden=2048, dropout=0.1, activation=F.relu,
+    def __init__(self, d_model, nheads, d_hidden=2048, dropout=0.1, activation=F.relu,
                  layer_norm_eps=1e-5, n_expert=4, capacity=None) -> None:
         super().__init__()
 
-        self.self_attn = torch.nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.self_attn = torch.nn.MultiheadAttention(d_model, nheads, dropout=dropout, batch_first=True)
 
         self.gate_weight = torch.nn.Parameter(torch.empty((d_model, n_expert)))
         torch.nn.init.kaiming_uniform_(self.gate_weight, a=math.sqrt(5))
@@ -298,11 +298,11 @@ class Top2TransformerEncoderLayer(torch.nn.Module):
         return output
 
 class SwitchTransformerEncoderLayer(torch.nn.Module):
-    def __init__(self, d_model, nhead, d_hidden=2048, dropout=0.1, activation=F.relu,
+    def __init__(self, d_model, nheads, d_hidden=2048, dropout=0.1, activation=F.relu,
                  layer_norm_eps=1e-5, n_expert=4, capacity=None) -> None:
         super().__init__()
 
-        self.self_attn = torch.nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.self_attn = torch.nn.MultiheadAttention(d_model, nheads, dropout=dropout, batch_first=True)
 
         self.gate_weight = torch.nn.Parameter(torch.empty((d_model, n_expert)))
         torch.nn.init.kaiming_uniform_(self.gate_weight, a=math.sqrt(5))

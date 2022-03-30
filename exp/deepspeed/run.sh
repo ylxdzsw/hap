@@ -10,4 +10,4 @@ python -u -m deepspeed.launcher.launch \
     --node_rank=$NODERANK \
     --master_addr=$(python -c 'import config;print(config.master_addr)') \
     --master_port=$(python -c 'import config;print(config.master_port)') \
-    ds.py --deepspeed_config=ds_config.json
+    train.py --deepspeed_config=ds_config.json
