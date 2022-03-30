@@ -7,13 +7,15 @@ sys.path.insert(1, f"{rootpath}/spmd")
 
 model_name = "Rmoe"
 
-world_size = 2
+world_size = 8
 nlayers = 12
 n_expert = 2 * world_size
 batch_size = 32 * world_size
 seqlen = 64 # 64 for vit, 128 for bert
 capacity_factor = 1.25
 capacity = math.floor(seqlen / n_expert * capacity_factor)
+if model_name.endswith('moe'):
+    capacity *= 2
 emsize = 768
 nhid = emsize * 4
 
@@ -118,7 +120,7 @@ def cifar10():
     return 10, it(train_data), it(test_data)
 
 def input_shape():
-    if model_name.endswith('R'):
+    if model_name.startswith('R'):
         return { 'x': (batch_size, seqlen), 'y': (batch_size, seqlen) }
     if model_name.startswith('V'):
         return { 'x': (batch_size, 3, 32, 32), 'y': (batch_size,) }

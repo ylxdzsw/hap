@@ -47,7 +47,7 @@ class TMoE(torch.nn.Module):
         self.layers = torch.nn.ModuleList([
             torch.nn.TransformerEncoderLayer(emsize, nhead, nhid, dropout, batch_first=True)
             if i % 2 == 0 else
-            SwitchTransformerEncoderLayer(emsize, nhead, nhid, dropout, n_expert=n_expert, capacity=capacity)
+            Top2TransformerEncoderLayer(emsize, nhead, nhid, dropout, n_expert=n_expert, capacity=capacity)
             for i in range(nlayers)
         ])
 
