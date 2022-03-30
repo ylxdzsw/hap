@@ -2,29 +2,28 @@ import os
 import sys
 import math
 
-if sys.path[0] == "":
-    sys.path[0] = "."
-sys.path.insert(1, f"{sys.path[0]}/../spmd")
+rootpath = "/root/spmd"
+sys.path.insert(1, f"{rootpath}/spmd")
 
-model_name = "moe"
+model_name = "Rmoe"
 
-world_size = 4
+world_size = 2
 nlayers = 12
 n_expert = 2 * world_size
 batch_size = 32 * world_size
-seqlen = 64
+seqlen = 64 # 64 for vit, 128 for bert
 capacity_factor = 1.25
 capacity = math.floor(seqlen / n_expert * capacity_factor)
-emsize = 512
+emsize = 768
 nhid = emsize * 4
 
 dropout = 0.1
-nheads = 4
+nheads = 12
 
 # master_addr = "127.0.0.1"
 # master_addr = "10.28.1.24" # g9
 # master_addr = "10.28.1.27" # g12
-master_addr = "172.26.161.155"
+master_addr = "172.26.161.164"
 master_port = 39261
 
 # trace = True
@@ -36,7 +35,7 @@ log_iterval = 10
 profile_noise = 0
 # profile_noise = 0.8
 
-lr = 1e-3
+lr = 1e-4
 
 if os.environ.get("CPN", "") != "":
     cards_per_node = int(os.environ["CPN"])
@@ -45,37 +44,50 @@ if os.environ.get("CPN", "") != "":
     sys.argv.append(",".join(str(offset + i) for i in range(cards_per_node)))
 
 def get_model(seed=None):
-    from models import MLP, MLP2, Transformer, TransformerR, MoE, ViT
+    import models
 
     if seed is not None:
         import torch
         torch.manual_seed(seed)
 
-    if model_name == 'mlp':
-        return MLP(nhid=emsize, nlayers=nlayers)
-    if model_name == 'mlp2':
-        return MLP2(nhid=emsize, nlayers=nlayers)
-    if model_name == 'transformer':
-        return Transformer(emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
-    if model_name == 'moe':
-        return MoE(emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
+    if model_name == 'Tmlp':
+        return models.TMLP(nhid=emsize, nlayers=nlayers)
+    if model_name == 'Tmlp2':
+        return models.TMLP2(nhid=emsize, nlayers=nlayers)
+    if model_name == 'Ttransformer':
+        return models.TTransformer(emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
+    if model_name == 'Tmoe':
+        return models.TMoE(emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
 
-    if model_name == 'transformerR':
+    if model_name == 'Rtransformer':
         ntokens, *_ = get_data()
-        return TransformerR(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
+        return models.RTransformer(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
+    if model_name == 'Rmoe':
+        ntokens, *_ = get_data()
+        return models.RMoE(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
+    if model_name == 'Rswitch':
+        ntokens, *_ = get_data()
+        return models.RSwitch(ntokens=ntokens, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
 
-    if model_name == 'vit':
+    if model_name == 'Vtransformer':
         nclasses, *_ = get_data()
-        return ViT(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
+        return models.VRransformer(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, nlayers=nlayers)
+    if model_name == 'Vmoe':
+        nclasses, *_ = get_data()
+        return models.VMoE(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
+    if model_name == 'Vswitch':
+        nclasses, *_ = get_data()
+        return models.VSwitch(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nhead=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers)
+
 
 def get_data():
-    if model_name == 'transformerR':
+    if model_name.startswith('R'):
         return wikitext2()
 
-    if model_name == 'vit':
+    if model_name.startswith('V'):
         return cifar10()
 
-    else:
+    if model_name.startswith('T'):
         import torch
         x = torch.rand(batch_size, seqlen, emsize) / 6
         y = torch.rand(batch_size)
@@ -85,9 +97,9 @@ def get_data():
         return 0, rep()
 
 def wikitext2():
-    sys.path.insert(1, f"{sys.path[0]}/../wikitext")
+    sys.path.insert(1, f"{rootpath}/wikitext")
     import data
-    corpus = data.Corpus(f"{sys.path[0]}/../wikitext")
+    corpus = data.Corpus(f"{rootpath}/wikitext")
     train_data = data.segmentify(data.batchify(corpus.train, batch_size), seqlen)
     test_data = data.segmentify(data.batchify(corpus.test, batch_size), seqlen)
     valid_data = data.segmentify(data.batchify(corpus.valid, batch_size), seqlen)
@@ -101,16 +113,17 @@ def cifar10():
         loader = torch.utils.data.DataLoader(data, batch_size=batch_size, drop_last=True)
         while True:
             yield from iter(loader)
-    train_data = torchvision.datasets.CIFAR10(f"{sys.path[0]}/../cifar10", train=True, transform=torchvision.transforms.ToTensor())
-    test_data = torchvision.datasets.CIFAR10(f"{sys.path[0]}/../cifar10", train=False, transform=torchvision.transforms.ToTensor())
+    train_data = torchvision.datasets.CIFAR10(f"{rootpath}/cifar10", train=True, transform=torchvision.transforms.ToTensor())
+    test_data = torchvision.datasets.CIFAR10(f"{rootpath}/cifar10", train=False, transform=torchvision.transforms.ToTensor())
     return 10, it(train_data), it(test_data)
 
 def input_shape():
     if model_name.endswith('R'):
         return { 'x': (batch_size, seqlen), 'y': (batch_size, seqlen) }
-    if 'vit' in model_name:
+    if model_name.startswith('V'):
         return { 'x': (batch_size, 3, 32, 32), 'y': (batch_size,) }
-    return { 'x': (batch_size, seqlen, emsize), 'y': (batch_size,) }
+    if model_name.startswith('T'):
+        return { 'x': (batch_size, seqlen, emsize), 'y': (batch_size,) }
 
 profiler_data = {
     "n_devices": world_size,
@@ -124,8 +137,8 @@ profiler_data = {
 
 
     # 'all_gather': 1629540629, 'all_reduce': 770636359, 'reduce_scatter': 1568092051, 'all_to_all': 5875506734, # four cards one per machine
-    # 'all_gather': 1444972440, 'all_reduce': 644687571, 'reduce_scatter': 1409464500, 'all_to_all': 9295475658, # 32 cards on 4 machines
-    'all_gather': 1138061790, 'all_reduce': 553212015, 'reduce_scatter': 1129505905, 'all_to_all': 10178889989, # 64 cards on 8 machines
+    # 'all_gather': 1214319225, 'all_reduce': 595955428, 'reduce_scatter': 1292886945, 'all_to_all': 9352273913, # 8 cards on 8 machines
+    'all_gather': 1224592728, 'all_reduce': 611692856, 'reduce_scatter': 1130230706, 'all_to_all': 10701240728, # 64 cards on 8 machines
 
     # "all_gather": 7586351942, "all_reduce": 4681009156, "reduce_scatter": 7900003407, "all_to_all": 21875592969, # NVLink (g11)
     # "all_gather": 3502600835, "all_reduce": 1888718528, "reduce_scatter": 3722992647, "all_to_all": 9616962998, # g9 g10

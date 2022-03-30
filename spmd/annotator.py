@@ -110,7 +110,7 @@ def normalize_arguments(node: torch.fx.node.Node) -> dict[str]:
         return { 'self': node.args[0] }
     if node.target == 'view':
         return { 'self': node.args[0], **{ f"s{i}": arg for i, arg in enumerate(node.args[1:]) } }
-    if node.target == models.switch_gating:
+    if node.target in (models.switch_gating, models.top_2_gating):
         return { 'gate_input': node.args[0], 'n_expert': node.args[1], 'capacity': node.args[2], 'gate_weight': node.args[3] }
     if node.target == models.append_cls_token:
         return { 'x': node.args[0], 'cls_token': node.args[1] }
@@ -422,7 +422,8 @@ def annotate_layer_norm(node: torch.fx.node.Node):
     node.meta['flops'] = 10 * math.prod(input_node.meta['output_shape'])
 
 @annotation_rule(models.switch_gating)
-def annotate_switch_gating(node: torch.fx.node.Node):
+@annotation_rule(models.top_2_gating)
+def annotate_moe_gating(node: torch.fx.node.Node):
     gate_input, n_expert, capacity, gate_weight = node.meta['arg_dict']['gate_input'], node.meta['arg_dict']['n_expert'], node.meta['arg_dict']['capacity'], node.meta['arg_dict']['gate_weight']
 
     assert isinstance(n_expert, int)
