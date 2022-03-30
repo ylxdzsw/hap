@@ -8,16 +8,16 @@ sys.path.insert(1, f"{rootpath}/spmd")
 model_name = "Vswitch"
 
 world_size = 64
-nlayers = 12
+nlayers = 8
 n_expert = 2 * world_size
 batch_size = 32 * world_size
 seqlen = 128
 if model_name.startswith('V'):
     seqlen = 64
 capacity_factor = 1.25
-capacity = math.floor(seqlen / n_expert * capacity_factor)
 if model_name.endswith('moe'):
-    capacity *= 2
+    capacity_factor *= 2
+capacity = math.ceil(seqlen / n_expert * capacity_factor)
 emsize = 768
 nhid = emsize * 4
 
@@ -32,6 +32,9 @@ master_port = 39261
 
 # trace = True
 trace = False
+
+# use_hints = True
+use_hints = False
 
 epoch = 40
 log_iterval = 10

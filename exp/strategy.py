@@ -1,4 +1,3 @@
-from sys import argv
 import config
 import torch
 import torch.fx
@@ -32,8 +31,18 @@ if config.profile_noise > 0:
 
 import spmd
 
+hints = {}
+
+if config.use_hints:
+    for node in nodes:
+        if node.target == torch.nn.functional.conv2d:
+            hints[node.name] = ['gather_1']
+        if node.target == torch.nn.functional.embedding:
+            hints[node.name] = ['gather_2']
+        # TODO: also add einsum? need to match the einsum code
+
 with measure_time("gen strategy") as t:
-    strategy = spmd.spmd(nodes, config.profiler_data, {})
+    strategy = spmd.spmd(nodes, config.profiler_data, hints)
 
 print(t)
 
