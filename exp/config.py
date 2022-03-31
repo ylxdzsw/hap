@@ -5,11 +5,11 @@ import math
 rootpath = "/root/spmd"
 sys.path.insert(1, f"{rootpath}/spmd")
 
-model_name = "Vswitch"
+model_name = "Rswitch"
 
-world_size = 64
+world_size = 4
 nlayers = 8
-n_expert = 2 * world_size
+n_expert = 1 * world_size
 batch_size = 32 * world_size
 seqlen = 128
 if model_name.startswith('V'):
@@ -24,10 +24,10 @@ nhid = emsize * 4
 dropout = 0.1
 nheads = 12
 
-# master_addr = "127.0.0.1"
+master_addr = "127.0.0.1"
 # master_addr = "10.28.1.24" # g9
 # master_addr = "10.28.1.27" # g12
-master_addr = "172.26.161.164"
+# master_addr = "172.26.161.164"
 master_port = 39261
 
 # trace = True
@@ -143,9 +143,14 @@ profiler_data = {
     "device_flops": 4139214925014, # V100 16G (ali), MoE
 
 
+    "all_gather": 7586351942, "all_reduce": 4681009156, "reduce_scatter": 7900003407, "all_to_all": 21875592969, # NVLink (2)
+    # "all_gather": 7586351942, "all_reduce": 4681009156, "reduce_scatter": 7900003407, "all_to_all": 21875592969, # NVLink (4)
+    # "all_gather": 7586351942, "all_reduce": 4681009156, "reduce_scatter": 7900003407, "all_to_all": 21875592969, # NVLink (8)
+
+
     # 'all_gather': 1629540629, 'all_reduce': 770636359, 'reduce_scatter': 1568092051, 'all_to_all': 5875506734, # four cards one per machine
     # 'all_gather': 1214319225, 'all_reduce': 595955428, 'reduce_scatter': 1292886945, 'all_to_all': 9352273913, # 8 cards on 8 machines
-    'all_gather': 1224592728, 'all_reduce': 611692856, 'reduce_scatter': 1130230706, 'all_to_all': 10701240728, # 64 cards on 8 machines
+    # 'all_gather': 1224592728, 'all_reduce': 611692856, 'reduce_scatter': 1130230706, 'all_to_all': 10701240728, # 64 cards on 8 machines
 
     # "all_gather": 7586351942, "all_reduce": 4681009156, "reduce_scatter": 7900003407, "all_to_all": 21875592969, # NVLink (g11)
     # "all_gather": 3502600835, "all_reduce": 1888718528, "reduce_scatter": 3722992647, "all_to_all": 9616962998, # g9 g10

@@ -4,7 +4,7 @@
     "optimizer": {
       "type": "Adam",
       "params": {
-        "lr": 0.001,
+        "lr": 0.0001,
         "betas": [
           0.8,
           0.999

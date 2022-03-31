@@ -30,7 +30,7 @@ args = parser.parse_args()
 
 class Top2TransformerEncoderLayer(nn.Module):
     def __init__(self):
-        super(SwitchTransformerEncoderLayer, self).__init__()
+        super().__init__()
 
         self.self_atten = torch.nn.MultiheadAttention(config.emsize, config.nheads, dropout=config.dropout, batch_first=True)
 
@@ -44,7 +44,7 @@ class Top2TransformerEncoderLayer(nn.Module):
             ),
             num_experts=config.n_expert,
             k=2,
-            capacity_factor=config.capacity_factor,
+            capacity_factor=config.capacity_factor / 2, # our capacity factor is multiplied by k
             noisy_gate_policy='RSample'
         )
 
@@ -52,18 +52,18 @@ class Top2TransformerEncoderLayer(nn.Module):
         self.norm2 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
         self.dropout = torch.nn.Dropout(config.dropout)
 
-    def forward(self, x):
-        x = self.norm1(x + self._sa_block(x))
+    def forward(self, x, src_mask = None):
+        x = self.norm1(x + self._sa_block(x, src_mask))
         x = self.norm2(x + self.moe(x)[0])
         return x
 
-    def _sa_block(self, x):
-        x = self.self_atten(x, x, x, need_weights=False)[0]
+    def _sa_block(self, x, attn_mask):
+        x = self.self_atten(x, x, x, attn_mask=attn_mask, need_weights=False)[0]
         return self.dropout(x)
 
 class SwitchTransformerEncoderLayer(nn.Module):
     def __init__(self):
-        super(SwitchTransformerEncoderLayer, self).__init__()
+        super().__init__()
 
         self.self_atten = torch.nn.MultiheadAttention(config.emsize, config.nheads, dropout=config.dropout, batch_first=True)
 
@@ -85,13 +85,13 @@ class SwitchTransformerEncoderLayer(nn.Module):
         self.norm2 = torch.nn.LayerNorm(config.emsize, eps=1e-5)
         self.dropout = torch.nn.Dropout(config.dropout)
 
-    def forward(self, x):
-        x = self.norm1(x + self._sa_block(x))
+    def forward(self, x, src_mask = None):
+        x = self.norm1(x + self._sa_block(x, src_mask))
         x = self.norm2(x + self.moe(x)[0])
         return x
 
-    def _sa_block(self, x):
-        x = self.self_atten(x, x, x, need_weights=False)[0]
+    def _sa_block(self, x, attn_mask):
+        x = self.self_atten(x, x, x, attn_mask=attn_mask, need_weights=False)[0]
         return self.dropout(x)
 
 class LogShape(torch.nn.Module):
