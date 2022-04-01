@@ -280,7 +280,7 @@ def run(global_rank, local_rank):
         if local_rank == 0:
             print(wall_time)
             result_times.append(wall_time.time)
-            print("avg:", sum(result_times[-50:]) / len(result_times[-50:]))
+            print("avg:", sum(result_times[-config.avg_iter:]) / len(result_times[-config.avg_iter:]))
 
     if not config.trace:
         return

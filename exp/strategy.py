@@ -41,6 +41,10 @@ if config.use_hints:
             hints[node.name] = ['gather_2']
         # TODO: also add einsum? need to match the einsum code
 
+for node in nodes:
+    if node.name.startswith("src_mask"):
+        hints[node.name] = ['replicate']
+
 with measure_time("gen strategy") as t:
     strategy = spmd.spmd(nodes, config.profiler_data, hints)
 
