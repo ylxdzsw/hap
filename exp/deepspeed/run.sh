@@ -1,6 +1,7 @@
 cd "${BASH_SOURCE%/*}"
 
-WORLDINFO=$(python -c 'import config;import json;print(json.dumps({f"{i}": [*range(config.cards_per_node)] for i in range(config.world_size//config.cards_per_node)}))')
+# WORLDINFO=$(python -c 'import config;import json;print(json.dumps({f"{i}": [*range(config.cards_per_node)] for i in range(config.world_size//config.cards_per_node)}))')
+WORLDINFO='{ "10.28.1.27": [0,1,2,3], "10.28.1.28": [0,1,2,3] }'
 echo $WORLDINFO
 
 unset CPN

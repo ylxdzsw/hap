@@ -241,20 +241,21 @@ model_engine, optimizer, _, __ = deepspeed.initialize(
     args=args, model=model, model_parameters=filter(lambda p: p.requires_grad, model.parameters()))
 
 result_times = []
-
-for i in range(100):
+last_iter_time = time.time()
+for i in range(config.run_iter):
     x, y = next(train_data)
     x = x.chunk(config.world_size, 0)[dist.get_rank()].cuda(model_engine.local_rank)
     y = y.chunk(config.world_size, 0)[dist.get_rank()].cuda(model_engine.local_rank)
-    start_time = time.time()
     loss = model_engine(x, y)
     model_engine.backward(loss)
     # torch.cuda.synchronize()
     model_engine.step()
     if model_engine.local_rank == 0:
-        print(f"iter {i}, time {time.time() - start_time}s")
-        result_times.append(time.time() - start_time)
+        iter_duration = time.time() - last_iter_time
+        print("iter time: ", iter_duration)
+        result_times.append(iter_duration)
         print("avg:", sum(result_times[-config.avg_iter:]) / len(result_times[-config.avg_iter:]))
+        last_iter_time += iter_duration
 
 if not config.trace:
     raise SystemExit

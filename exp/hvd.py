@@ -21,22 +21,25 @@ train_data = config.get_data()[1]
 hvd.broadcast_parameters(model.state_dict(), root_rank=0)
 
 result_times = []
-for iter in range(100):
+last_iter_time = time.time()
+for iter in range(config.run_iter):
     optimizer.zero_grad()
     x, y = next(train_data)
     x = x.chunk(config.world_size, 0)[hvd.rank()].cuda()
     y = y.chunk(config.world_size, 0)[hvd.rank()].cuda()
-    with measure_time(f"iteration {iter}") as wall_time:
-        loss = model(x, y)
-        if hvd.local_rank() == 0:
-            print(f"loss {iter}:", loss.detach().cpu().numpy())
-
-        loss.backward()
-        optimizer.step()
+    loss = model(x, y)
     if hvd.local_rank() == 0:
-        print(wall_time)
-        result_times.append(wall_time.time)
+        print(f"loss {iter}:", loss.detach().cpu().numpy())
+
+    loss.backward()
+    optimizer.step()
+    # hvd.allreduce(torch.tensor(0), name='barrier')
+    if hvd.local_rank() == 0:
+        iter_duration = time.time() - last_iter_time
+        print("iter time: ", iter_duration)
+        result_times.append(iter_duration)
         print("avg:", sum(result_times[-config.avg_iter:]) / len(result_times[-config.avg_iter:]))
+        last_iter_time += iter_duration
 
 if not config.trace:
     raise SystemExit

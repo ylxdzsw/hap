@@ -23,26 +23,28 @@ def run(global_rank, local_rank):
     train_data = config.get_data()[1]
 
     result_times = []
-    for iter in range(100):
+    last_iter_time = time.time()
+    for iter in range(config.run_iter):
         x, y = next(train_data)
         x = x.cuda(local_rank)
         y = y.cuda(local_rank)
-        with measure_time(f"iteration {iter}") as wall_time:
-            loss = model(x, y)
-            aggregated_loss = loss.detach().clone()
-            dist.reduce(aggregated_loss, 0)
-            if global_rank == 0:
-                print(f"loss {iter}:", aggregated_loss.cpu().numpy())
-            # dist.barrier(device_ids=[global_rank])
+        loss = model(x, y)
+        aggregated_loss = loss.detach().clone()
+        dist.reduce(aggregated_loss, 0)
+        if global_rank == 0:
+            print(f"loss {iter}:", aggregated_loss.cpu().numpy())
+        # dist.barrier(device_ids=[global_rank])
 
-            loss.backward()
-            # torch.cuda.synchronize()
-            optimizer.step()
-            # dist.barrier()
+        loss.backward()
+        # torch.cuda.synchronize()
+        optimizer.step()
+        # dist.barrier()
         if local_rank == 0:
-            print(wall_time)
-            result_times.append(wall_time.time)
+            iter_duration = time.time() - last_iter_time
+            print("iter time: ", iter_duration)
+            result_times.append(iter_duration)
             print("avg:", sum(result_times[-config.avg_iter:]) / len(result_times[-config.avg_iter:]))
+            last_iter_time += iter_duration
 
     # for epoch in range(config.epoch):
     #     total_loss = 0.

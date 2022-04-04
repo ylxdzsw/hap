@@ -261,7 +261,7 @@ def run(global_rank, local_rank):
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
 
     result_times = []
-    for iter in range(100): # Fastmoe getting slower and slower during training for unknown reason
+    for iter in range(config.run_iter):
         x, y = next(train_data)
         x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
         y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
@@ -276,7 +276,7 @@ def run(global_rank, local_rank):
             loss.backward()
             # torch.cuda.synchronize()
             optimizer.step()
-            # dist.barrier()
+            dist.barrier()
         if local_rank == 0:
             print(wall_time)
             result_times.append(wall_time.time)
