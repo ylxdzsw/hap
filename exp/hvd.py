@@ -1,6 +1,6 @@
 import config
 import sys
-import datetime
+import time
 import torch
 import torch.fx
 from torch.profiler import profile, record_function, ProfilerActivity

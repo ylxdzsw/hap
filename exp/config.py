@@ -2,10 +2,13 @@ import os
 import sys
 import math
 
-rootpath = "/home/swzhang/spmd"
+rootpath = "/root/spmd"
 sys.path.insert(1, f"{rootpath}/spmd")
 
-model_name = "Vmoe"
+model_name = "Rmoe"
+# model_name = "Rswitch"
+# model_name = "Vmoe"
+# model_name = "Vswitch"
 
 world_size = 8
 nlayers = 8
@@ -24,10 +27,7 @@ nhid = emsize * 4
 dropout = 0.1
 nheads = 12
 
-# master_addr = "127.0.0.1"
-# master_addr = "10.28.1.24" # g9
-master_addr = "10.28.1.27" # g12
-# master_addr = "172.26.161.164"
+master_addr = "127.0.0.1"
 master_port = 39262
 
 # trace = True
@@ -44,8 +44,8 @@ profile_noise = 0
 
 lr = 1e-4
 
-run_iter = 20
-avg_iter = 10
+run_iter = 100
+avg_iter = 50
 
 if os.environ.get("CPN", "") != "":
     cards_per_node = int(os.environ["CPN"])
@@ -138,32 +138,7 @@ def input_shape():
 profiler_data = {
     "n_devices": world_size,
 
-    # "device_flops": 5603062517020, # V100 16G (g11), MLP
-    # "device_flops": 3312996495566, # V100 16G (g11), MoE
-    # "device_flops": 4468888991664, # 1080Ti (g10), MLP
-    # "device_flops": 2218545605794, # 1080Ti (g10), MoE
-    # "device_flops": 2474540597913, # A10 (DLC), MoE
-    "device_flops": 4139214925014, # V100 16G (ali), MoE
+    "device_flops": 4139214925014,
 
-
-    # 'all_gather': 22857795249, 'all_reduce': 17452758728, 'reduce_scatter': 23055206497, 'all_to_all': 44729020224, # NVLink (2)
-    # 'all_gather': 42951925323, 'all_reduce': 38910456093, 'reduce_scatter': 50644360961, 'all_to_all': 111029509634, # NVLink (4)
-    # 'all_gather': 48201431081, 'all_reduce': 50535729566, 'reduce_scatter': 58284784289, 'all_to_all': 134818107096, # NVLink (8)
-
-    # 'all_gather': 1629540629, 'all_reduce': 770636359, 'reduce_scatter': 1568092051, 'all_to_all': 5875506734, # four cards one per machine
-    # 'all_gather': 1214319225, 'all_reduce': 595955428, 'reduce_scatter': 1292886945, 'all_to_all': 9352273913, # 8 cards on 8 machines
-    # 'all_gather': 1224592728, 'all_reduce': 611692856, 'reduce_scatter': 1130230706, 'all_to_all': 10701240728, # 64 cards on 8 machines
-
-    # 'all_gather': 1001087208, 'all_reduce': 521374243, 'reduce_scatter': 1008491802, 'all_to_all': 8178455843, # 8G
-    # 'all_gather': 1001087208//4*3, 'all_reduce': 521374243//4*3, 'reduce_scatter': 1008491802//4*3, 'all_to_all': 8178455843//4*3, # 6G
-    # 'all_gather': 1001087208//2, 'all_reduce': 521374243//2, 'reduce_scatter': 1008491802//2, 'all_to_all': 8178455843//2, # 4G
-    # 'all_gather': 1001087208//4, 'all_reduce': 521374243//4, 'reduce_scatter': 1008491802//4, 'all_to_all': 8178455843//4, # 2G
-
-    # "all_gather": 7586351942, "all_reduce": 4681009156, "reduce_scatter": 7900003407, "all_to_all": 21875592969, # NVLink (g11)
-    # "all_gather": 3502600835, "all_reduce": 1888718528, "reduce_scatter": 3722992647, "all_to_all": 9616962998, # g9 g10
-
-    # 'all_gather': 9945955397, 'all_reduce': 9207170743, 'reduce_scatter': 10625682127, 'all_to_all': 32335689089, # g12 g13 unrestricted
-    # 'all_gather': 10027415816, 'all_reduce': 8885859102, 'reduce_scatter': 9575593107, 'all_to_all': 31165856203, # g12 g13 30g
-    # 'all_gather': 2713350389, 'all_reduce': 1514696378, 'reduce_scatter': 2791041514, 'all_to_all': 11485952902, # g12 g13 20g
-    'all_gather': 1625100034, 'all_reduce': 1170626319, 'reduce_scatter': 1735390353, 'all_to_all': 7726947281, # g12 g13 10g
+    'all_gather': 1224592728, 'all_reduce': 611692856, 'reduce_scatter': 1130230706, 'all_to_all': 10701240728,
 }
