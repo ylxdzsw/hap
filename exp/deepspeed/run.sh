@@ -5,6 +5,8 @@ echo $WORLDINFO
 
 unset CPN
 
+python gen_ds_config.py > ds_config.json
+
 python -u -m deepspeed.launcher.launch \
     --world_info="$(base64 <<< "$WORLDINFO")" \
     --node_rank=$NODERANK \

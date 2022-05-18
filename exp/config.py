@@ -47,7 +47,10 @@ lr = 1e-4
 run_iter = 50
 avg_iter = 20
 
-fp16 = False
+# fp16 = False
+fp16 = True
+
+ds_zero = 0
 
 if os.environ.get("CPN", "") != "":
     cards_per_node = int(os.environ["CPN"])
