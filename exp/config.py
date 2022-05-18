@@ -2,7 +2,7 @@ import os
 import sys
 import math
 
-rootpath = "/root/spmd"
+rootpath = "/home/swzhang/spmd"
 sys.path.insert(1, f"{rootpath}/spmd")
 
 model_name = "Rmoe"
@@ -10,7 +10,7 @@ model_name = "Rmoe"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
 
-world_size = 8
+world_size = 4
 nlayers = 8
 n_expert = 2 * world_size
 batch_size = 32 * world_size
@@ -44,8 +44,10 @@ profile_noise = 0
 
 lr = 1e-4
 
-run_iter = 100
-avg_iter = 50
+run_iter = 50
+avg_iter = 20
+
+fp16 = False
 
 if os.environ.get("CPN", "") != "":
     cards_per_node = int(os.environ["CPN"])

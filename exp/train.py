@@ -6,6 +6,7 @@ import math
 import torch
 import torch.fx
 from torch.profiler import profile, record_function, ProfilerActivity
+from contextlib import nullcontext
 
 from annotator import annotate
 from compiler import compile
@@ -28,7 +29,10 @@ def run(global_rank, local_rank):
         x, y = next(train_data)
         x = x.cuda(local_rank)
         y = y.cuda(local_rank)
-        loss = model(x, y)
+
+        with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
+            loss = model(x, y)
+
         aggregated_loss = loss.detach().clone()
         dist.reduce(aggregated_loss, 0)
         if global_rank == 0:
