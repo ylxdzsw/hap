@@ -47,26 +47,26 @@ for iter in range(config.run_iter):
 if not config.trace:
     raise SystemExit
 
-# x, y = next(train_data)
-# x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
-# y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
-# with profile(
-#     activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
-#     # record_shapes = True,
-#     # profile_memory = True,
-#     schedule = torch.profiler.schedule(wait=1, warmup=10, active=4)
-# ) as prof:
-#     for _ in range(15):
-#         with record_function("forward"):
-#             loss = model(x, y)
-#         with record_function("backward"):
-#             loss.backward()
-#             torch.cuda.synchronize()
-#         with record_function("update"):
-#             optimizer.step()
-#         dist.barrier()
-#         prof.step()
+x, y = next(train_data)
+x = x.chunk(config.world_size, 0)[hvd.rank()].cuda()
+y = y.chunk(config.world_size, 0)[hvd.rank()].cuda()
+with profile(
+    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    # record_shapes = True,
+    # profile_memory = True,
+    schedule = torch.profiler.schedule(wait=1, warmup=10, active=4)
+) as prof:
+    for _ in range(15):
+        with record_function("forward"):
+            loss = model(x, y)
+        with record_function("backward"):
+            loss.backward()
+            # torch.cuda.synchronize()
+        with record_function("update"):
+            optimizer.step()
+        hvd.allreduce(torch.tensor(0), name='barrier')
+        prof.step()
 
-# if local_rank == 0:
-#     # print(prof.key_averages().table(sort_by="cuda_time_total"))
-#     prof.export_chrome_trace("trace.json")
+if hvd.local_rank() == 0:
+    # print(prof.key_averages().table(sort_by="cuda_time_total"))
+    prof.export_chrome_trace("trace.json")
