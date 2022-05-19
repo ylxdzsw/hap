@@ -3,6 +3,7 @@ import config
 import sys
 import torch
 import torch.fx
+import math
 
 from annotator import annotate
 from compiler import compile

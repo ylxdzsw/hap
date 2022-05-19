@@ -4,6 +4,8 @@ import time
 import torch
 import torch.fx
 from torch.profiler import profile, record_function, ProfilerActivity
+from contextlib import nullcontext
+import numpy as np
 
 from utils import *
 
@@ -27,7 +29,8 @@ for iter in range(config.run_iter):
     x, y = next(train_data)
     x = x.chunk(config.world_size, 0)[hvd.rank()].cuda()
     y = y.chunk(config.world_size, 0)[hvd.rank()].cuda()
-    loss = model(x, y)
+    with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
+        loss = model(x, y)
     if hvd.local_rank() == 0:
         print(f"loss {iter}:", loss.detach().cpu().numpy())
 
@@ -38,7 +41,7 @@ for iter in range(config.run_iter):
         iter_duration = time.time() - last_iter_time
         print("iter time: ", iter_duration)
         result_times.append(iter_duration)
-        print("avg:", sum(result_times[-config.avg_iter:]) / len(result_times[-config.avg_iter:]))
+        print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
         last_iter_time += iter_duration
 
 if not config.trace:

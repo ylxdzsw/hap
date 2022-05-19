@@ -2,6 +2,7 @@ import config
 
 import os
 import datetime
+import numpy as np
 
 env = os.environ.copy()
 env["PATH"] = "/home/swzhang/miniconda3/envs/th19/bin:" + env["PATH"]
@@ -254,7 +255,7 @@ for i in range(config.run_iter):
         iter_duration = time.time() - last_iter_time
         print("iter time: ", iter_duration)
         result_times.append(iter_duration)
-        print("avg:", sum(result_times[-config.avg_iter:]) / len(result_times[-config.avg_iter:]))
+        print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
         last_iter_time += iter_duration
 
 if not config.trace:

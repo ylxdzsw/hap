@@ -26,17 +26,7 @@ base = {
     },
     "gradient_clipping": 1.0,
     "prescale_gradients": False,
-    "wall_clock_breakdown": False,
-    "zero_optimization": {
-        "stage": config.ds_zero,
-        "allgather_partitions": True,
-        "reduce_scatter": True,
-        "allgather_bucket_size": 50000000,
-        "reduce_bucket_size": 50000000,
-        "overlap_comm": True,
-        "contiguous_gradients": True,
-        "cpu_offload": False
-    }
+    "wall_clock_breakdown": False
 }
 
 if config.fp16:

@@ -9,6 +9,8 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.profiler import profile, record_function, ProfilerActivity
+from contextlib import nullcontext
+import numpy as np
 
 from models import positional_encoding, PatchEmbed, append_cls_token, get_cls_token
 
@@ -266,7 +268,8 @@ def run(global_rank, local_rank):
         x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
         y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
         with measure_time(f"iteration {iter}") as wall_time:
-            loss = model(x, y)
+            with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
+                loss = model(x, y)
             aggregated_loss = loss.detach().clone()
             dist.reduce(aggregated_loss, 0)
             if global_rank == 0:
@@ -280,7 +283,7 @@ def run(global_rank, local_rank):
         if local_rank == 0:
             print(wall_time)
             result_times.append(wall_time.time)
-            print("avg:", sum(result_times[-config.avg_iter:]) / len(result_times[-config.avg_iter:]))
+            print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
 
     if not config.trace:
         return
@@ -296,7 +299,8 @@ def run(global_rank, local_rank):
     ) as prof:
         for _ in range(15):
             with record_function("forward"):
-                loss = model(x, y)
+                with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
+                    loss = model(x, y)
             with record_function("backward"):
                 loss.backward()
                 torch.cuda.synchronize()

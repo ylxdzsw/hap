@@ -7,6 +7,7 @@ import torch
 import torch.fx
 from torch.profiler import profile, record_function, ProfilerActivity
 from contextlib import nullcontext
+import numpy as np
 
 from annotator import annotate
 from compiler import compile
@@ -47,7 +48,7 @@ def run(global_rank, local_rank):
             iter_duration = time.time() - last_iter_time
             print("iter time: ", iter_duration)
             result_times.append(iter_duration)
-            print("avg:", sum(result_times[-config.avg_iter:]) / len(result_times[-config.avg_iter:]))
+            print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
             last_iter_time += iter_duration
 
     # for epoch in range(config.epoch):
@@ -88,7 +89,8 @@ def run(global_rank, local_rank):
     ) as prof:
         for _ in range(15):
             with record_function("forward"):
-                loss = model(x, y)
+                with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
+                    loss = model(x, y)
             with record_function("backward"):
                 loss.backward()
                 torch.cuda.synchronize()

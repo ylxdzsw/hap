@@ -2,6 +2,7 @@ import config
 import torch
 import torch.fx
 import numpy as np
+import math
 
 from annotator import annotate
 from utils import *
@@ -9,6 +10,8 @@ from utils import *
 model = symbolic_trace(config.get_model(seed=39))
 
 print(model.code)
+
+print("Total parameters:", sum(math.prod(p.size()) for p in model.parameters()))
 
 annotate(model, config.input_shape())
 print_annotated_graph(model.graph)
