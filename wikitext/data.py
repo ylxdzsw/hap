@@ -17,11 +17,16 @@ class Dictionary(object):
         return len(self.idx2word)
 
 class Corpus(object):
-    def __init__(self, path):
+    def __init__(self, path, is_103=False):
         self.dictionary = Dictionary()
-        self.train = self.tokenize(os.path.join(path, 'train.txt'))
-        self.valid = self.tokenize(os.path.join(path, 'valid.txt'))
-        self.test = self.tokenize(os.path.join(path, 'test.txt'))
+        if is_103:
+            self.train = self.tokenize(os.path.join(path, 'wiki.train.tokens'))
+            self.valid = self.tokenize(os.path.join(path, 'wiki.valid.tokens'))
+            self.test = self.tokenize(os.path.join(path, 'wiki.test.tokens'))
+        else:
+            self.train = self.tokenize(os.path.join(path, 'train.txt'))
+            self.valid = self.tokenize(os.path.join(path, 'valid.txt'))
+            self.test = self.tokenize(os.path.join(path, 'test.txt'))
 
     def tokenize(self, path):
         """Tokenizes a text file."""

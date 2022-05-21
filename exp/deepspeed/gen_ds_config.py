@@ -3,30 +3,14 @@ import json
 
 base = {
     "train_micro_batch_size_per_gpu": config.batch_size // config.world_size,
-    "steps_per_print": 2000,
+    "steps_per_print": 2000000,
     "optimizer": {
       "type": "Adam",
       "params": {
-        "lr": 0.0001,
-        "betas": [
-          0.8,
-          0.999
-        ],
-        "eps": 1e-8,
-        "weight_decay": 3e-7
+        "lr": config.lr
       }
     },
-    "scheduler": {
-      "type": "WarmupLR",
-      "params": {
-        "warmup_min_lr": 0,
-        "warmup_max_lr": 0.001,
-        "warmup_num_steps": 1000
-      }
-    },
-    "gradient_clipping": 1.0,
-    "prescale_gradients": False,
-    "wall_clock_breakdown": False
+    "gradient_clipping": 0.5
 }
 
 if config.fp16:

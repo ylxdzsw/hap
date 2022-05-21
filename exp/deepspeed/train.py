@@ -241,22 +241,36 @@ model = { "Rmoe": RMoE, "Rswitch": RSwitch, "Vmoe": VMoE, "Vswitch": VSwitch }[c
 model_engine, optimizer, _, __ = deepspeed.initialize(
     args=args, model=model, model_parameters=filter(lambda p: p.requires_grad, model.parameters()))
 
+global_rank = dist.get_rank()
+
 result_times = []
-last_iter_time = time.time()
-for i in range(config.run_iter):
+strat_time = last_iter_time = time.time()
+total_loss = 0
+for iter in range(config.run_iter):
     x, y = next(train_data)
-    x = x.chunk(config.world_size, 0)[dist.get_rank()].cuda(model_engine.local_rank)
-    y = y.chunk(config.world_size, 0)[dist.get_rank()].cuda(model_engine.local_rank)
+    x = x.chunk(config.world_size, 0)[global_rank].cuda(model_engine.local_rank)
+    y = y.chunk(config.world_size, 0)[global_rank].cuda(model_engine.local_rank)
+
     loss = model_engine(x, y)
+    aggregated_loss = loss.detach().clone()
+    dist.reduce(aggregated_loss, 0)
+
+    if global_rank == 0:
+        total_loss += aggregated_loss.cpu().numpy() / config.batch_size / config.seqlen
+        if iter % config.log_iter == 0:
+            print(f"loss (log ppl) {iter}: {total_loss / config.log_iter:.3f}, wall clock: {time.time() - strat_time:.3f}")
+            total_loss = 0
+
     model_engine.backward(loss)
     # torch.cuda.synchronize()
     model_engine.step()
-    if model_engine.local_rank == 0:
+
+    if config.report_per_iter_time and model_engine.local_rank == 0:
         iter_duration = time.time() - last_iter_time
-        print("iter time: ", iter_duration)
         result_times.append(iter_duration)
-        print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
         last_iter_time += iter_duration
+        print("iter time: ", iter_duration)
+        print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
 
 if not config.trace:
     raise SystemExit
@@ -264,8 +278,8 @@ if not config.trace:
 from torch.profiler import profile, record_function, ProfilerActivity
 
 x, y = next(train_data)
-x = x.chunk(config.world_size, 0)[dist.get_rank()].cuda(model_engine.local_rank)
-y = y.chunk(config.world_size, 0)[dist.get_rank()].cuda(model_engine.local_rank)
+x = x.chunk(config.world_size, 0)[global_rank].cuda(model_engine.local_rank)
+y = y.chunk(config.world_size, 0)[global_rank].cuda(model_engine.local_rank)
 with profile(
     activities= [ProfilerActivity.CPU, ProfilerActivity.CUDA],
     schedule = torch.profiler.schedule(wait=1, warmup=10, active=4)

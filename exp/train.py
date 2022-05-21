@@ -25,8 +25,10 @@ def run(global_rank, local_rank):
     train_data = config.get_data()[1]
 
     result_times = []
-    last_iter_time = time.time()
+    strat_time = last_iter_time = time.time()
+    total_loss = 0
     for iter in range(config.run_iter):
+        optimizer.zero_grad()
         x, y = next(train_data)
         x = x.cuda(local_rank)
         y = y.cuda(local_rank)
@@ -37,19 +39,23 @@ def run(global_rank, local_rank):
         aggregated_loss = loss.detach().clone()
         dist.reduce(aggregated_loss, 0)
         if global_rank == 0:
-            print(f"loss {iter}:", aggregated_loss.cpu().numpy())
+            total_loss += aggregated_loss.cpu().numpy() / config.batch_size / config.seqlen
+            if iter % config.log_iter == 0:
+                print(f"loss (log ppl) {iter}: {total_loss / config.log_iter:.3f}, wall clock: {time.time() - strat_time:.3f}")
+                total_loss = 0
         # dist.barrier(device_ids=[global_rank])
 
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         # torch.cuda.synchronize()
         optimizer.step()
         # dist.barrier()
-        if local_rank == 0:
+        if config.report_per_iter_time and local_rank == 0:
             iter_duration = time.time() - last_iter_time
-            print("iter time: ", iter_duration)
             result_times.append(iter_duration)
-            print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
             last_iter_time += iter_duration
+            print("iter time: ", iter_duration)
+            print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
 
     # for epoch in range(config.epoch):
     #     total_loss = 0.

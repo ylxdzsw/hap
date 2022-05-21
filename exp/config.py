@@ -10,7 +10,7 @@ model_name = "Rmoe"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
 
-world_size = 4
+world_size = 8
 nlayers = 8
 n_expert = 2 * world_size
 batch_size = 32 * world_size
@@ -28,6 +28,7 @@ dropout = 0.1
 nheads = 12
 
 master_addr = "10.28.1.27"
+# master_addr = "127.0.0.1"
 master_port = 39262
 
 trace = True
@@ -36,16 +37,17 @@ trace = True
 # use_hints = True
 use_hints = False
 
-epoch = 40
-log_iterval = 10
+report_per_iter_time = True
+# report_per_iter_time = False
 
 profile_noise = 0
 # profile_noise = 0.8
 
-lr = 1e-4
+lr = 5e-4
 
 run_iter = 50
 avg_iter = 20
+log_iter = 10
 
 fp16 = False
 # fp16 = True
@@ -96,6 +98,7 @@ def get_model(seed=None):
 def get_data():
     if model_name.startswith('R'):
         return wikitext2()
+        # return wikitext103()
 
     if model_name.startswith('V'):
         return cifar10()
@@ -113,6 +116,17 @@ def wikitext2():
     sys.path.insert(1, f"{rootpath}/wikitext")
     import data
     corpus = data.Corpus(f"{rootpath}/wikitext")
+    train_data = data.segmentify(data.batchify(corpus.train, batch_size), seqlen)
+    test_data = data.segmentify(data.batchify(corpus.test, batch_size), seqlen)
+    valid_data = data.segmentify(data.batchify(corpus.valid, batch_size), seqlen)
+    ntokens = world_size * (len(corpus.dictionary) // world_size + 1) # we have to ensure that it is dividable
+    return ntokens, train_data, test_data, valid_data
+
+def wikitext103():
+    sys.path.insert(1, f"{rootpath}/wikitext")
+    import data
+    from pathlib import Path
+    corpus = data.Corpus(f"{str(Path.home())}/.torchtext/cache/WikiText103/wikitext-103", is_103=True)
     train_data = data.segmentify(data.batchify(corpus.train, batch_size), seqlen)
     test_data = data.segmentify(data.batchify(corpus.test, batch_size), seqlen)
     valid_data = data.segmentify(data.batchify(corpus.valid, batch_size), seqlen)
@@ -144,4 +158,5 @@ profiler_data = {
     "device_flops": 4139214925014,
 
     'all_gather': 1224592728, 'all_reduce': 611692856, 'reduce_scatter': 1130230706, 'all_to_all': 10701240728,
+    # 'all_gather': 7429968322//2, 'all_reduce': 4421821530//2, 'reduce_scatter': 7537901123//2, 'all_to_all': 25451035500//2
 }
