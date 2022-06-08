@@ -2,7 +2,7 @@ import os
 import sys
 import math
 
-rootpath = "/home/swzhang/spmd"
+rootpath = "/root/spmd"
 sys.path.insert(1, f"{rootpath}/spmd")
 
 model_name = "Rmoe"
@@ -27,8 +27,7 @@ nhid = emsize * 4
 dropout = 0.1
 nheads = 12
 
-master_addr = "10.28.1.27"
-# master_addr = "127.0.0.1"
+master_addr = "127.0.0.1"
 master_port = 39262
 
 trace = True
@@ -49,8 +48,8 @@ run_iter = 50
 avg_iter = 20
 log_iter = 10
 
-fp16 = False
 # fp16 = True
+fp16 = False
 
 if os.environ.get("CPN", "") != "":
     cards_per_node = int(os.environ["CPN"])

@@ -1,6 +1,6 @@
 Source code for "Accelerating Large-Scale Distributed Neural Network Training with SPMD Parallelism"
 
-We recommend our Docker image (https://hub.docker.com/r/ylxdzsw/spmd) for reproducing the experiments in the paper.
+We recommend our Docker image (https://hub.docker.com/r/ylxdzsw/hidup) for reproducing the experimental results in the paper.
 
 === Experiment VI.B ===
 
@@ -78,27 +78,85 @@ Workflow:
 
 === Experiment VI.E ===
 
-Experiment Summary: We evaluate the impact of our computation and communication time estimation on the strategy found by HiDup.
+Experiment Summary: We evaluate HiDup, DeepSpeed and FastMoE on 2 machines with different batch sizes.
 
 Software: Same as in Experiment VI.D
 
-Hardware: Same as in Experiment VI.D
+Hardware:
+    - 100Gbps RDMA network (Dell Z9100-ON)
+    - Others are the same as in Experiment VI.D
 
 Workflow:
-    1. Change "profile_noise" in "config.py" to the noise level. For example, "profile_noise = 0.8" corresponds to "Noise level 80%" in Table I.
-    2. Follow steps 1 to 8 of Experiment VI.B to collect the results for the strategy based on the noisy estimated times. Repeat 10 times under the same noise level and calculate the average relative time.
-    3. Repeat steps 1 and 2 with different noise levels to collect data for Table I.
+    1. Change "batch_size" in "config.py".
+    2. Follow steps 1 to 10 of Experiment VI.B to collect the results with the batch size specified in step 1.
+    3. Repeat steps 1 and 2 with different batch sizes to collect data for Figure 10.
 
 
 === Experiment VI.F ===
 
+Experiment Summary: We evaluate HiDup, DeepSpeed and FastMoE on 2 machines with mixed precision training.
+
+Software: Same as in Experiment VI.E
+
+Hardware: Same as in Experiment VI.E
+
+Workflow:
+    1. Edit "config.py" and set "fp16" to "True".
+    2. Follow steps 1 to 10 of Experiment VI.B to collect the results with mixed precision training enabled.
+    3. Repeat steps 1 and 2 with different noise levels to collect data for Table II.
+
+
+=== Experiment VI.G ===
+
+Experiment Summary: We analyze the per-iteration time of HiDup, DeepSpeed and FastMoE on 2 machines.
+
+Software: Same as in Experiment VI.E
+
+Hardware: Same as in Experiment VI.E
+
+Workflow:
+    1. Edit "config.py" and set "trace" to "True".
+    2. Follow steps 1 to 10 of Experiment VI.B. After running a training task, a file named "trace.json" will be generated in the folder. It uses the Chrome trace event format.
+    3. Analyze the execution trace to make Table III. We treat NCCL operations and MemcpyDtoD as communication and other operations as computation.
+
+
+=== Experiment VI.H ===
+
+Experiment Summary: We evaluate HiDup, DeepSpeed and FastMoE on 2 machines by training BERT-SGMoE until convergence.
+
+Software: Same as in Experiment VI.E
+
+Hardware: Same as in Experiment VI.E
+
+Workflow:
+    1. Edit "config.py" and set "run_iter" to a large number.
+    2. Follow steps 1 to 10 of Experiment VI.B. Manually terminate the training when the loss stops decreasing.
+
+
+=== Experiment VI.I ===
+
+Experiment Summary: We evaluate the impact of our computation and communication time estimation on the strategy found by HiDup.
+
+Software: Same as in Experiment VI.E
+
+Hardware: Same as in Experiment VI.E
+
+Workflow:
+    1. Change "profile_noise" in "config.py" to the noise level for "x% random noise". For example, "profile_noise = 0.8" corresponds to "80% random noise" in Table IV.
+    2. Change "profiler_data" in "config.py" by scaling the bandwidth for "±y% communication". For example, doubling the bandwidth corresponds to "-50% communication" in Table IV.
+    3. Follow steps 1 to 8 of Experiment VI.B to collect the results for the strategy based on the noisy estimated times. Repeat 10 times for "x% random noise" under the same noise level and calculate the average relative time.
+    4. Repeat steps 1 to 3 with different kinds of noise to collect data for Table IV.
+
+
+=== Experiment VI.J ===
+
 Experiment Summary: We study HiDup's strategy search time regarding the number of GPUs and the number of layers for the BERT-SGMoE model.
 
-Software: Same as in Experiment VI.D
+Software: Same as in Experiment VI.E
 
-Hardware: Same as in Experiment VI.D
+Hardware: Same as in Experiment VI.E
 
 Workflow:
     1. Change "nlayers" and "world_size" in "config.py", which are the number of layers and the number of GPUs, respectively.
     2. Run "time python strategy.py" to record the strategy search time.
-    3. Repeat steps 1 and 2 with different numbers of layers and numbers of GPUs to collect data for Figure 10.
+    3. Repeat steps 1 and 2 with different numbers of layers and numbers of GPUs to collect data for Figure 12.
