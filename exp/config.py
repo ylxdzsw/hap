@@ -2,7 +2,7 @@ import os
 import sys
 import math
 
-rootpath = "/root/spmd"
+rootpath = "/root/hidup"
 sys.path.insert(1, f"{rootpath}/spmd")
 
 model_name = "Rmoe"

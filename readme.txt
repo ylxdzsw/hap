@@ -103,7 +103,6 @@ Hardware: Same as in Experiment VI.E
 Workflow:
     1. Edit "config.py" and set "fp16" to "True".
     2. Follow steps 1 to 10 of Experiment VI.B to collect the results with mixed precision training enabled.
-    3. Repeat steps 1 and 2 with different noise levels to collect data for Table II.
 
 
 === Experiment VI.G ===
