@@ -137,11 +137,17 @@ struct Program {
     properties: BTreeSet<Property>,
     cost: f64,
     ecost: f64,
+
+    next_communicatable_id: RTensorId,
+    next_free_id: RTensorId,
 }
 
 impl Display for Program {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "length: {}, cost: {}, ecost: {}", self.triples.len(), self.cost, self.ecost)?;
+        writeln!(f, "next communicatable id: {}", self.next_communicatable_id.0);
+        writeln!(f, "next free id: {}", self.next_free_id.0);
+
         writeln!(f, "=== properties ===")?;
         for property in &self.properties {
             writeln!(f, "{}", property)?;
@@ -165,11 +171,28 @@ impl Program {
         let cost = self.cost + triple.instruction.get_cost(profiler);
         let ecost = 0.0;
 
-        Program { triples, properties, cost, ecost }
+        let next_communicatable_id = if let Instruction::Communication(tensor_id, _) = triple.instruction {
+            tensor_id + 1
+        } else {
+            self.next_communicatable_id
+        };
+
+        let next_free_id = match triple.instruction {
+            Instruction::GetAttr(_) | Instruction::Placeholder(_) => triple.post_conditions[0].tensor_id + 1,
+            _ => self.next_free_id,
+        };
+
+        Program { triples, properties, cost, ecost, next_communicatable_id, next_free_id }
     }
 
     fn find_available_triples<'s, 't: 's>(&'s self, triples: &'t [HoareTriple]) -> Vec<&'t HoareTriple> {
         triples.iter().filter(|triple| {
+            match triple.instruction {
+                Instruction::GetAttr(_) | Instruction::Placeholder(_) if triple.post_conditions[0].tensor_id != self.next_free_id => return false,
+                Instruction::Communication(tensor_id, _) if tensor_id < self.next_communicatable_id => return false,
+                _ => {}
+            }
+
             triple.pre_conditions.iter().all(|p| self.properties.contains(p)) && (triple.post_conditions.iter().any(|p| !self.properties.contains(p)) || triple.instruction == Instruction::Output)
         }).collect()
     }
@@ -271,31 +294,54 @@ fn main() {
             post_conditions: smallvec![
                 Property { tensor_id: RTensorId(1), relation: PropertyRelation::Identity }
             ],
-            instruction: Instruction::GetAttr(PyParameterId(1)),
+            instruction: Instruction::GetAttr(PyParameterId(0)),
         },
         HoareTriple {
             pre_conditions: smallvec![],
             post_conditions: smallvec![
                 Property { tensor_id: RTensorId(1), relation: PropertyRelation::Gather(0) }
             ],
-            instruction: Instruction::GetAttr(PyParameterId(1)),
+            instruction: Instruction::GetAttr(PyParameterId(0)),
         },
         HoareTriple {
             pre_conditions: smallvec![],
             post_conditions: smallvec![
                 Property { tensor_id: RTensorId(1), relation: PropertyRelation::Gather(1) }
             ],
+            instruction: Instruction::GetAttr(PyParameterId(0)),
+        },
+
+        // Parameter: 2
+        HoareTriple {
+            pre_conditions: smallvec![],
+            post_conditions: smallvec![
+                Property { tensor_id: RTensorId(2), relation: PropertyRelation::Identity }
+            ],
+            instruction: Instruction::GetAttr(PyParameterId(1)),
+        },
+        HoareTriple {
+            pre_conditions: smallvec![],
+            post_conditions: smallvec![
+                Property { tensor_id: RTensorId(2), relation: PropertyRelation::Gather(0) }
+            ],
+            instruction: Instruction::GetAttr(PyParameterId(1)),
+        },
+        HoareTriple {
+            pre_conditions: smallvec![],
+            post_conditions: smallvec![
+                Property { tensor_id: RTensorId(2), relation: PropertyRelation::Gather(1) }
+            ],
             instruction: Instruction::GetAttr(PyParameterId(1)),
         },
 
-        // 2 = 0 * 1
+        // 3 = 0 * 1
         HoareTriple {
             pre_conditions: smallvec![
                 Property { tensor_id: RTensorId(0), relation: PropertyRelation::Identity },
                 Property { tensor_id: RTensorId(1), relation: PropertyRelation::Identity },
             ],
             post_conditions: smallvec![
-                Property { tensor_id: RTensorId(2), relation: PropertyRelation::Identity }
+                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Identity }
             ],
             instruction: Instruction::Op(PyOpCodeId(0)),
         },
@@ -305,7 +351,7 @@ fn main() {
                 Property { tensor_id: RTensorId(1), relation: PropertyRelation::Identity },
             ],
             post_conditions: smallvec![
-                Property { tensor_id: RTensorId(2), relation: PropertyRelation::Gather(0) }
+                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Gather(0) }
             ],
             instruction: Instruction::Op(PyOpCodeId(0)),
         },
@@ -315,7 +361,7 @@ fn main() {
                 Property { tensor_id: RTensorId(1), relation: PropertyRelation::Gather(1) },
             ],
             post_conditions: smallvec![
-                Property { tensor_id: RTensorId(2), relation: PropertyRelation::Gather(1) }
+                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Gather(1) }
             ],
             instruction: Instruction::Op(PyOpCodeId(0)),
         },
@@ -325,64 +371,108 @@ fn main() {
                 Property { tensor_id: RTensorId(1), relation: PropertyRelation::Gather(0) },
             ],
             post_conditions: smallvec![
-                Property { tensor_id: RTensorId(2), relation: PropertyRelation::Reduce }
+                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Reduce }
             ],
             instruction: Instruction::Op(PyOpCodeId(0)),
         },
 
-        // 3 = sum(2)
+        // 4 = 3 * 2
         HoareTriple {
             pre_conditions: smallvec![
+                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Identity },
                 Property { tensor_id: RTensorId(2), relation: PropertyRelation::Identity },
             ],
             post_conditions: smallvec![
-                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Identity }
+                Property { tensor_id: RTensorId(4), relation: PropertyRelation::Identity }
             ],
             instruction: Instruction::Op(PyOpCodeId(1)),
         },
         HoareTriple {
             pre_conditions: smallvec![
-                Property { tensor_id: RTensorId(2), relation: PropertyRelation::Gather(0) },
+                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Gather(0) },
+                Property { tensor_id: RTensorId(2), relation: PropertyRelation::Identity },
             ],
             post_conditions: smallvec![
-                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Reduce }
+                Property { tensor_id: RTensorId(4), relation: PropertyRelation::Gather(0) }
             ],
             instruction: Instruction::Op(PyOpCodeId(1)),
         },
         HoareTriple {
             pre_conditions: smallvec![
+                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Identity },
                 Property { tensor_id: RTensorId(2), relation: PropertyRelation::Gather(1) },
             ],
             post_conditions: smallvec![
-                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Reduce }
+                Property { tensor_id: RTensorId(4), relation: PropertyRelation::Gather(1) }
             ],
             instruction: Instruction::Op(PyOpCodeId(1)),
         },
         HoareTriple {
             pre_conditions: smallvec![
-                Property { tensor_id: RTensorId(2), relation: PropertyRelation::Reduce },
+                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Gather(1) },
+                Property { tensor_id: RTensorId(2), relation: PropertyRelation::Gather(0) },
             ],
             post_conditions: smallvec![
-                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Reduce }
+                Property { tensor_id: RTensorId(4), relation: PropertyRelation::Reduce }
             ],
             instruction: Instruction::Op(PyOpCodeId(1)),
         },
 
-        // output: 3
+        // 5 = sum(4)
         HoareTriple {
             pre_conditions: smallvec![
-                Property { tensor_id: RTensorId(3), relation: PropertyRelation::Reduce },
+                Property { tensor_id: RTensorId(4), relation: PropertyRelation::Identity },
+            ],
+            post_conditions: smallvec![
+                Property { tensor_id: RTensorId(5), relation: PropertyRelation::Identity }
+            ],
+            instruction: Instruction::Op(PyOpCodeId(2)),
+        },
+        HoareTriple {
+            pre_conditions: smallvec![
+                Property { tensor_id: RTensorId(4), relation: PropertyRelation::Gather(0) },
+            ],
+            post_conditions: smallvec![
+                Property { tensor_id: RTensorId(5), relation: PropertyRelation::Reduce }
+            ],
+            instruction: Instruction::Op(PyOpCodeId(2)),
+        },
+        HoareTriple {
+            pre_conditions: smallvec![
+                Property { tensor_id: RTensorId(4), relation: PropertyRelation::Gather(1) },
+            ],
+            post_conditions: smallvec![
+                Property { tensor_id: RTensorId(5), relation: PropertyRelation::Reduce }
+            ],
+            instruction: Instruction::Op(PyOpCodeId(2)),
+        },
+        HoareTriple {
+            pre_conditions: smallvec![
+                Property { tensor_id: RTensorId(4), relation: PropertyRelation::Reduce },
+            ],
+            post_conditions: smallvec![
+                Property { tensor_id: RTensorId(5), relation: PropertyRelation::Reduce }
+            ],
+            instruction: Instruction::Op(PyOpCodeId(2)),
+        },
+
+        // output: 5
+        HoareTriple {
+            pre_conditions: smallvec![
+                Property { tensor_id: RTensorId(5), relation: PropertyRelation::Reduce },
             ],
             post_conditions: smallvec![],
             instruction: Instruction::Output,
         },
     ];
 
-    for tensor_id in 0..3 {
+    for tensor_id in 0..5 {
         triples.extend(gen_communication_triple(RTensorId(tensor_id), 2));
     }
 
     let profiler = Profiler;
+
+    // println!("{}", triples.len());
 
     a_star(&triples, &profiler);
 }
