@@ -1,5 +1,5 @@
 [package]
-name = "spmd"
+name = "hetspmd"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,5 +10,5 @@ crate-type = ["cdylib"]
 oh-my-rust = { git = "https://github.com/ylxdzsw/oh-my-rust" }
 cpython = { version = "0.6", features = ["extension-module"] }
 smallvec = { version = "1", features = ["union", "const_generics", "specialization", "may_dangle"] }
-# float-ord = "0.3"
+float-ord = "0.3"
 ctrlc = "3.2"

@@ -12,6 +12,9 @@ pub struct Node {
     pub outputs: SVec<TensorIndex>,
     pub signatures: Vec<Signature>,
 
+    pub input_names: SVec<String>, // original node name of the inputs
+    pub companions: SVec<Option<usize>>, // the origin_id of adaptive nodes in the output order
+
     pub flops: u64,
     pub name: String,
 }
@@ -113,9 +116,9 @@ pub struct Signature {
     pub output_forms: SVec<Form>
 }
 
-crate::new_usize_type!(pub, NodeIndex);
-crate::new_usize_type!(pub, TensorIndex);
-crate::new_usize_type!(pub, SignatureIndex);
+crate::new_index_type!(pub, NodeIndex);
+crate::new_index_type!(pub, TensorIndex);
+crate::new_index_type!(pub, SignatureIndex);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Collective {
