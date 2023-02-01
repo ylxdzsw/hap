@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 oh-my-rust = { git = "https://github.com/ylxdzsw/oh-my-rust" }
-cpython = { version = "0.6", features = ["extension-module"] }
+cpython = { version = "0.7", features = ["extension-module"] }
 smallvec = { version = "1", features = ["union", "const_generics", "specialization", "may_dangle"] }
 float-ord = "0.3"
 ctrlc = "3.2"
