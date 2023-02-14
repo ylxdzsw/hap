@@ -57,8 +57,15 @@ def symbolic_trace(module, inline_functions=[]):
         return origin(*args)
     with stub(torch.nn.functional, "has_torch_function", f):
         graph = Tracer().trace(module)
+
     graph.eliminate_dead_code()
-    return torch.fx.graph_module.GraphModule(module, graph)
+    model = torch.fx.graph_module.GraphModule(module, graph)
+
+    from torch.fx.experimental.normalize import NormalizeArgs, NormalizeOperators
+    model = NormalizeArgs(model).transform()
+    model = NormalizeOperators(model).transform()
+
+    return model
 
 def save(file: str, var: ...):
     import pickle
