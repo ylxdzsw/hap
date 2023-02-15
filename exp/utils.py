@@ -118,3 +118,11 @@ def graph_to_dot(graph, strategy):
                 """
 
     return f"digraph strategy {{{dot}}}"
+
+# a helper function to use in Rust side
+def get_shape_of_param_or_buffer(graph_module, node):
+    try:
+        p = graph_module.get_parameter(node.target)
+    except AttributeError:
+        p = graph_module.get_buffer(node.target)
+    return tuple(p.shape)

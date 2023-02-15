@@ -4,13 +4,11 @@ use std::ops::{Index, IndexMut};
 use std::sync::{atomic::AtomicBool, Arc};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
-use std::fmt::Display;
+use std::fmt::{Display, Debug, Formatter};
 use std::cmp::Ordering;
 use float_ord::FloatOrd;
-use oh_my_rust::*;
-use cpython::{PyResult, PyTuple, ToPyObject, PythonObject, ObjectProtocol, Python, PyList, PyObject, PyDict};
+use cpython::{PyResult, PyTuple, ToPyObject, PythonObject, ObjectProtocol, Python, PyList, PyObject, PyDict, PyClone};
 use smallvec::{SmallVec, smallvec};
-use indoc::indoc;
 
 pub type SVec<T, const N: usize = 3> = SmallVec<[T; N]>;
 
@@ -25,19 +23,17 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
     }
 
     #[allow(clippy::manual_strip)]
-    m.add(py, "main", cpython::py_fn!(py, main(py_graph_module: PyObject, py_config: PyObject) -> PyResult<PyList> {
+    m.add(py, "main", cpython::py_fn!(py, main(py_graph_module: PyObject, py_config: PyDict) -> PyResult<PyList> {
+        let py_input_shape_dict = py_config.get_item(py, "input_shape").unwrap();
+        let (rgraph, module_info) = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
+
+        eprintln!("graph: {rgraph:#?}");
+        eprintln!("module_info: {module_info:#?}");
+
         // let triples = load_fx_graph(py, py_graph_module)?;
         // for triple in &triples {
             // eprintln!("{}", triple);
         // }
-
-        eprintln!("{:p}", py.eval("torch.nn.functional.linear", None, None).unwrap().as_ptr());
-        eprintln!("{:p}", py.eval("torch.nn.functional.linear", None, None).unwrap().as_ptr());
-
-        let a = PyDict::new(py);
-        a.set_item(py, "a", py_graph_module).unwrap();
-
-        eprintln!("{:p}", py.eval("list(a.graph.nodes)[4].target", None, Some(&a)).unwrap().as_ptr());
 
         // a_star(&triples, &Profiler);
         Ok(PyList::new(py, &[]))
@@ -336,7 +332,7 @@ struct RGraph {
     tensors: Vec<RTensor>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ModuleInfo {
     placeholders: Vec<String>,
     parameters: Vec<String>,
@@ -406,8 +402,17 @@ struct OpCodegenContext<'py> {
 }
 
 struct Op {
+    py_name: String,
     codegen: Box<dyn Fn(&mut OpCodegenContext)>,
     // profile: Box<dyn Fn(&mut OpProfileContext)>
+}
+
+impl Debug for Op {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Op")
+            .field("py_name", &self.py_name)
+            .finish()
+    }
 }
 
 struct ParserContext<'py, 'g, 'm, 'r> {
@@ -432,15 +437,10 @@ impl EvalResult {
     }
 }
 
-macro_rules! py_ptr_of {
-    ($py:ident, $expr:expr) => {
-        $py.eval($expr, None, None)?.as_ptr() as _
-    };
-}
-
 fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'static dyn Fn(ParserContext, PyObject) -> PyResult<()>>> {
-    let mut parsing_handlers: BTreeMap<*mut (), &'static dyn Fn(ParserContext, PyObject) -> PyResult<()>>= BTreeMap::new();
+    let mut parsing_handlers: BTreeMap<*mut (), &'static dyn Fn(ParserContext, PyObject) -> PyResult<()>> = BTreeMap::new();
 
+    parsing_handlers.insert(py.eval("torch.nn.functional.linear", None, None)?.as_ptr() as _, &handle_linear);
     fn handle_linear(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
         let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
 
@@ -481,12 +481,13 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         });
 
         ctx.graph.nodes.push(RNode {
-            inputs: SVec::from_slice(&[input_input_tensor_id, input_weight_tensor_id, input_bias_tensor_id]),
-            outputs: SVec::from_slice(&[tensor_id]),
+            inputs: smallvec![input_input_tensor_id, input_weight_tensor_id, input_bias_tensor_id],
+            outputs: smallvec![tensor_id],
             instruction: RInstruction::Op(op_id)
         });
 
         ctx.module_info.ops.push(Op {
+            py_name: "torch.nn.functional.linear".to_string(),
             codegen: Box::new(|ctx: &mut OpCodegenContext| {
                 todo!()
             })
@@ -500,12 +501,84 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         Ok(())
     }
-    parsing_handlers.insert(py_ptr_of!(py, "torch.nn.functional.linear"), &handle_linear);
 
+    parsing_handlers.insert(py.eval("torch.sigmoid", None, None)?.as_ptr() as _, &handle_sigmoid);
     fn handle_sigmoid(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_input_input_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "input")?;
+        let py_input_input_id = py_input_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?;
+        let input_input_tensor_id = ctx.results[py_input_input_id].as_ref().unwrap().as_tensor();
+        let input_input_tensor = &ctx.graph[input_input_tensor_id];
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+        let op_id = OpId(ctx.module_info.ops.len());
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            shape: input_input_tensor.shape.clone()
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_input_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op_id)
+        });
+
+        ctx.module_info.ops.push(Op {
+            py_name: "torch.sigmoid".to_string(),
+            codegen: Box::new(|ctx: &mut OpCodegenContext| {
+                todo!()
+            })
+        });
+
+        ctx.graph[input_input_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
         Ok(())
     }
-    parsing_handlers.insert(py_ptr_of!(py, "torch.sigmoid"), &handle_sigmoid);
+
+    parsing_handlers.insert(py.eval("torch.sum", None, None)?.as_ptr() as _, &handle_sum);
+    fn handle_sum(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "dim").map(|x| x.is_none(ctx.py)).unwrap_or(true));
+        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "keepdim").map(|x| x.is_none(ctx.py)).unwrap_or(true));
+        assert!(py_node.getattr(ctx.py, "args")?.len(ctx.py)? == 1);
+
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_input_input_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 0)?;
+        let py_input_input_id = py_input_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?;
+        let input_input_tensor_id = ctx.results[py_input_input_id].as_ref().unwrap().as_tensor();
+        let input_input_tensor = &ctx.graph[input_input_tensor_id];
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+        let op_id = OpId(ctx.module_info.ops.len());
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            shape: smallvec![]
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_input_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op_id)
+        });
+
+        ctx.module_info.ops.push(Op {
+            py_name: "torch.sum".to_string(),
+            codegen: Box::new(|ctx: &mut OpCodegenContext| {
+                todo!()
+            })
+        });
+
+        ctx.graph[input_input_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
 
     Ok(parsing_handlers)
 }
@@ -570,13 +643,10 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                 let name: String = py_node.getattr(py, "target")?.extract(py)?;
                 module_info.parameters.push(name);
 
-                let shape: Vec<usize> = py.eval(indoc!{"
-                    try:
-                        p = graph_module.get_parameter(node.target)
-                    except AttributeError:
-                        p = graph_module.get_buffer(node.target)
-                    tuple(p.shape)
-                "}, None, Some(&py_dict!(py, graph_module => py_graph_module, node => py_node)))?.extract(py)?;
+                let shape: Vec<usize> = py.eval(
+                    "get_shape_of_param_or_buffer(graph_module, node)",
+                    None, Some(&py_dict!(py, graph_module => py_graph_module, node => py_node))
+                )?.extract(py)?;
 
                 let node_id = RNodeId(graph.nodes.len());
                 let tensor_id = RTensorId(graph.tensors.len());

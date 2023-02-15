@@ -12,6 +12,8 @@ print(model.code)
 for i, node in enumerate(model.graph.nodes):
     node.meta['id'] = i
 
-print(hetspmd.main(model, {}))
+print(hetspmd.main(model, {
+    "input_shape": config.input_shape()
+}))
 
 
