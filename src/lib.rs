@@ -1,4 +1,5 @@
 #![allow(unused)]
+#![allow(non_upper_case_globals)]
 #![feature(let_chains)]
 
 use std::ops::{Index, IndexMut};
@@ -31,11 +32,11 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         eprintln!("graph: {rgraph:#?}");
         eprintln!("module_info: {module_info:#?}");
 
-        let triples = analyze_rgraph(&rgraph, &module_info);
+        let (triples, default_properties) = analyze_rgraph(&rgraph, &module_info);
 
         eprintln!("triples: {triples:#?}");
 
-        a_star(&triples, &Profiler);
+        a_star(&triples, Program::empty(default_properties), &Profiler);
         Ok(PyList::new(py, &[]))
     }))?;
 
@@ -100,6 +101,7 @@ pub enum Collective {
 struct HoareTriple {
     pre_conditions: SVec<Property>,
     post_conditions: SVec<Property, 1>,
+    negative_post_conditions: Vec<Property>,
     instruction: DInstruction,
 }
 
@@ -119,48 +121,62 @@ impl Display for HoareTriple {
             }
             write!(f, "{p}")?;
         }
+        // for (i, p) in self.negative_post_conditions.iter().enumerate() {
+        //     if i > 0 || !self.post_conditions.is_empty() {
+        //         write!(f, ", ")?;
+        //     }
+        //     write!(f, "¬{p}")?;
+        // }
         write!(f, "}}")?;
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Property {
-    tensor_id: RTensorId,
-    relation: PropertyRelation,
+enum Property {
+    Relation(RTensorId, TensorRelation),
+    Finished,
+    AllowCommunication(RTensorId),
+    AllowPlaceholder(PlaceholderId),
+    AllowGetAttr(ParameterId),
 }
 
 impl Display for Property {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}|{:?}", self.tensor_id.0, self.relation)
+        match self {
+            Property::Relation(tensor_id, relation) => {
+                write!(f, "{}|{:?}", tensor_id.0, relation)
+            }
+            Property::Finished => write!(f, "output"),
+            Property::AllowCommunication(tensor_id) => {
+                write!(f, "{}|allow_communication", tensor_id.0)
+            }
+            Property::AllowPlaceholder(placeholder_id) => {
+                write!(f, "{}|allow_placeholder", placeholder_id.0)
+            }
+            Property::AllowGetAttr(parameter_id) => {
+                write!(f, "{}|allow_get_attr", parameter_id.0)
+            }
+        }
     }
 }
 
 impl Property {
     fn identity(tensor_id: RTensorId) -> Property {
-        Property {
-            tensor_id,
-            relation: PropertyRelation::Identity,
-        }
+        Property::Relation(tensor_id, TensorRelation::Identity)
     }
 
     fn gather(tensor_id: RTensorId, dim: u8) -> Property {
-        Property {
-            tensor_id,
-            relation: PropertyRelation::Gather(dim),
-        }
+        Property::Relation(tensor_id, TensorRelation::Gather(dim))
     }
 
     fn reduce(tensor_id: RTensorId) -> Property {
-        Property {
-            tensor_id,
-            relation: PropertyRelation::Reduce,
-        }
+        Property::Relation(tensor_id, TensorRelation::Reduce)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum PropertyRelation {
+enum TensorRelation {
     Gather(u8),
     Reduce,
     Identity,
@@ -214,16 +230,11 @@ struct Program {
     properties: BTreeSet<Property>, // active properties whose corresponding tensors may still be used by future instructions
     cost: f64,
     ecost: f64,
-
-    next_communicatable_id: RTensorId,
-    next_free_id: RTensorId,
 }
 
 impl Display for Program {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "length: {}, cost: {}, ecost: {}", self.triples.len(), self.cost, self.ecost)?;
-        writeln!(f, "next communicatable id: {}", self.next_communicatable_id.0);
-        writeln!(f, "next free id: {}", self.next_free_id.0);
 
         writeln!(f, "=== active properties ===")?;
         for property in &self.properties {
@@ -238,48 +249,37 @@ impl Display for Program {
 }
 
 impl Program {
+    fn empty(properties: impl IntoIterator<Item=Property>) -> Program {
+        Program { properties: properties.into_iter().collect(), ..Default::default() }
+    }
+
     fn with_a_new_triple(&self, triple: &HoareTriple, profiler: &Profiler) -> Program {
         let mut triples = self.triples.clone();
         triples.push(triple.clone());
 
-        let mut properties = self.properties.clone();
-        properties.extend(triple.post_conditions.iter().cloned());
+        let mut properties = self.properties.iter()
+            .filter(|p| !triple.negative_post_conditions.contains(p))
+            .chain(triple.post_conditions.iter())
+            .cloned()
+            .collect();
 
         let cost = self.cost + triple.instruction.get_cost(profiler);
         let ecost = 0.0;
 
-        let next_communicatable_id = if let DInstruction::Communication(_) = triple.instruction {
-            triple.post_conditions[0].tensor_id + 1
-        } else {
-            self.next_communicatable_id
-        };
-
-        let next_free_id = if let DInstruction::GetAttr(_, _) | DInstruction::Placeholder(_, _) = triple.instruction {
-            triple.post_conditions[0].tensor_id + 1
-        } else {
-            self.next_free_id
-        };
-
-        Program { triples, properties, cost, ecost, next_communicatable_id, next_free_id }
+        Program { triples, properties, cost, ecost }
     }
 
     fn find_available_triples<'s, 't: 's>(&'s self, triples: &'t IndexedHoareTriples) -> Vec<HoareTripleId> {
-        let candidates: BTreeSet<_> = self.properties.iter().flat_map(|p| &triples[p.tensor_id]).copied().chain(triples.free_triples.clone()).collect();
+        let candidates: BTreeSet<_> = self.properties.iter().flat_map(|p| &triples[*p]).copied().collect();
 
         candidates.into_iter().filter(|triple_id| {
             let triple = &triples[*triple_id];
-            match triple.instruction {
-                DInstruction::GetAttr(_, _) | DInstruction::Placeholder(_, _) if triple.post_conditions[0].tensor_id < self.next_free_id => return false,
-                DInstruction::Communication(_) if triple.post_conditions[0].tensor_id < self.next_communicatable_id => return false,
-                _ => {}
-            }
-
-            triple.pre_conditions.iter().all(|p| self.properties.contains(p)) && (triple.post_conditions.iter().any(|p| !self.properties.contains(p)) || triple.instruction == DInstruction::Output)
+            triple.pre_conditions.iter().all(|p| self.properties.contains(p)) && triple.post_conditions.iter().any(|p| !self.properties.contains(p))
         }).collect()
     }
 
     fn is_complete(&self) -> bool {
-        self.triples.iter().any(|p| p.instruction == DInstruction::Output)
+        self.properties.iter().any(|p| *p == Property::Finished)
     }
 }
 
@@ -353,13 +353,13 @@ impl Drop for Ticker {
     }
 }
 
-fn a_star(triples: &IndexedHoareTriples, profiler: &Profiler) -> Program {
+fn a_star(triples: &IndexedHoareTriples, initial_program: Program, profiler: &Profiler) -> Program {
     let mut heap = BinaryHeap::new();
     let mut best_program: Option<Program> = None;
     let mut property_cache: BTreeMap<BTreeSet<Property>, f64> = BTreeMap::new();
 
-    heap.push(ProgramHeapEntry::new(Program::default()));
-    property_cache.insert(BTreeSet::new(), 0.0);
+    property_cache.insert(initial_program.properties.clone(), 0.);
+    heap.push(ProgramHeapEntry::new(initial_program));
 
     let mut ticker = Ticker::new(5000);
 
@@ -376,7 +376,7 @@ fn a_star(triples: &IndexedHoareTriples, profiler: &Profiler) -> Program {
             continue;
         }
 
-        eprintln!("{program}");
+        // eprintln!("{program}");
         if program.is_complete() {
             if best_program.as_ref().map(|p| p.cost > program.cost).unwrap_or(true) {
                 best_program = Some(program);
@@ -825,26 +825,17 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
 
 new_usize_type!(pub, HoareTripleId);
 
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct IndexedHoareTriples {
     triples: Vec<HoareTriple>,
-    index: Vec<Vec<HoareTripleId>>, // tensor_id -> triple_ids, indexing the relavent triples of a tensor
-    free_triples: Vec<HoareTripleId> // list of triples that have empty pre-conditions
+    index: BTreeMap<Property, Vec<HoareTripleId>>
 }
 
 impl IndexedHoareTriples {
-    fn new(n_nodes: usize) -> Self {
-        Self { triples: vec![], index: vec![vec![]; n_nodes], free_triples: vec![] }
-    }
-
     fn add_triple(&mut self, triple: HoareTriple) {
         let triple_id = HoareTripleId(self.triples.len());
-        for tensor_id in triple.pre_conditions.iter().map(|p| p.tensor_id) {
-            self[tensor_id].push(triple_id);
-        }
-        if triple.pre_conditions.is_empty() {
-            self.free_triples.push(triple_id);
+        for property in triple.pre_conditions.iter() {
+            self.index.entry(property.clone()).or_default().push(triple_id);
         }
         self.triples.push(triple);
     }
@@ -858,22 +849,19 @@ impl Index<HoareTripleId> for IndexedHoareTriples {
     }
 }
 
-impl Index<RTensorId> for IndexedHoareTriples {
+impl Index<Property> for IndexedHoareTriples {
     type Output = Vec<HoareTripleId>;
 
-    fn index(&self, index: RTensorId) -> &Self::Output {
-        &self.index[index.0]
+    fn index(&self, index: Property) -> &Self::Output {
+        static empty: Vec<HoareTripleId> = vec![];
+        self.index.get(&index).unwrap_or(&empty)
     }
 }
 
-impl IndexMut<RTensorId> for IndexedHoareTriples {
-    fn index_mut(&mut self, index: RTensorId) -> &mut Self::Output {
-        &mut self.index[index.0]
-    }
-}
+fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> (IndexedHoareTriples, Vec<Property>) {
+    let mut triples: IndexedHoareTriples = Default::default();
 
-fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTriples {
-    let mut triples = IndexedHoareTriples::new(rgraph.nodes.len());
+    let mut default_properties = vec![];
 
     // basics: Placeholder, GetAttr, Output, and identity for ops
     for (node_id, node) in rgraph.nodes.iter().enumerate() {
@@ -882,17 +870,22 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
         match node.instruction {
             RInstruction::Placeholder(placeholder_id) => {
                 let tensor_id = node.outputs[0];
+                default_properties.push(Property::AllowPlaceholder(placeholder_id));
+
+                let negative_post_conditions: Vec<_> = (0..=placeholder_id.0).into_iter().map(PlaceholderId).map(Property::AllowPlaceholder).collect();
 
                 triples.add_triple(HoareTriple {
-                    pre_conditions: smallvec![],
+                    pre_conditions: smallvec![Property::AllowPlaceholder(placeholder_id)],
                     post_conditions: smallvec![Property::identity(tensor_id)],
+                    negative_post_conditions: negative_post_conditions.clone(),
                     instruction: DInstruction::Placeholder(placeholder_id, ShardingForm::Unsharded)
                 });
 
                 for dim in 0..rgraph[tensor_id].n_dims() {
                     triples.add_triple(HoareTriple {
-                        pre_conditions: smallvec![],
+                        pre_conditions: smallvec![Property::AllowPlaceholder(placeholder_id)],
                         post_conditions: smallvec![Property::gather(tensor_id, dim)],
+                        negative_post_conditions: negative_post_conditions.clone(),
                         instruction: DInstruction::Placeholder(placeholder_id, ShardingForm::Sharded(dim))
                     });
                 }
@@ -900,17 +893,22 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
 
             RInstruction::GetAttr(parameter_id) => {
                 let tensor_id = node.outputs[0];
+                default_properties.push(Property::AllowGetAttr(parameter_id));
+
+                let negative_post_conditions: Vec<_> = (0..=parameter_id.0).into_iter().map(ParameterId).map(Property::AllowGetAttr).collect();
 
                 triples.add_triple(HoareTriple {
-                    pre_conditions: smallvec![],
+                    pre_conditions: smallvec![Property::AllowGetAttr(parameter_id)],
                     post_conditions: smallvec![Property::identity(tensor_id)],
+                    negative_post_conditions: negative_post_conditions.clone(),
                     instruction: DInstruction::GetAttr(parameter_id, ShardingForm::Unsharded)
                 });
 
                 for dim in 0..rgraph[tensor_id].n_dims() {
                     triples.add_triple(HoareTriple {
-                        pre_conditions: smallvec![],
+                        pre_conditions: smallvec![Property::AllowGetAttr(parameter_id)],
                         post_conditions: smallvec![Property::gather(tensor_id, dim)],
+                        negative_post_conditions: negative_post_conditions.clone(),
                         instruction: DInstruction::GetAttr(parameter_id, ShardingForm::Sharded(dim))
                     });
                 }
@@ -921,7 +919,8 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
 
                 triples.add_triple(HoareTriple {
                     pre_conditions: smallvec![Property::reduce(tensor_id)],
-                    post_conditions: smallvec![],
+                    post_conditions: smallvec![Property::Finished],
+                    negative_post_conditions: vec![],
                     instruction: DInstruction::Output
                 });
             }
@@ -930,6 +929,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
                 triples.add_triple(HoareTriple {
                     pre_conditions: node.inputs.iter().map(|&tensor_id| Property::identity(tensor_id)).collect(),
                     post_conditions: node.outputs.iter().map(|&tensor_id| Property::identity(tensor_id)).collect(),
+                    negative_post_conditions: vec![],
                     instruction: DInstruction::Op(op_id)
                 });
             }
@@ -937,6 +937,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
     }
 
     // communication
+    let mut communicatable_tensor_ids = vec![];
     for (tensor_id, tensor) in rgraph.tensors.iter().enumerate() {
         let tensor_id = RTensorId(tensor_id);
 
@@ -944,23 +945,30 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
             continue;
         }
 
+        default_properties.push(Property::AllowCommunication(tensor_id));
+        communicatable_tensor_ids.push(tensor_id);
+        let negative_post_conditions: Vec<_> = communicatable_tensor_ids.iter().copied().map(Property::AllowCommunication).collect();
+
         for dim in 0..tensor.n_dims() {
             triples.add_triple(HoareTriple {
-                pre_conditions: smallvec![Property::gather(tensor_id, dim)],
+                pre_conditions: smallvec![Property::gather(tensor_id, dim), Property::AllowCommunication(tensor_id)],
                 post_conditions: smallvec![Property::identity(tensor_id)],
+                negative_post_conditions: negative_post_conditions.clone(),
                 instruction: DInstruction::Communication(Collective::AllGather(dim))
             });
 
             triples.add_triple(HoareTriple {
-                pre_conditions: smallvec![Property::identity(tensor_id)],
+                pre_conditions: smallvec![Property::identity(tensor_id), Property::AllowCommunication(tensor_id)],
                 post_conditions: smallvec![Property::gather(tensor_id, dim)],
+                negative_post_conditions: negative_post_conditions.clone(),
                 instruction: DInstruction::Communication(Collective::DynamicSlice(dim))
             });
         }
 
         triples.add_triple(HoareTriple {
-            pre_conditions: smallvec![Property::reduce(tensor_id)],
+            pre_conditions: smallvec![Property::reduce(tensor_id), Property::AllowCommunication(tensor_id)],
             post_conditions: smallvec![Property::identity(tensor_id)],
+            negative_post_conditions: negative_post_conditions.clone(),
             instruction: DInstruction::Communication(Collective::AllReduce)
         });
 
@@ -968,8 +976,9 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
             for j in 0..tensor.n_dims() {
                 if i != j {
                     triples.add_triple(HoareTriple {
-                        pre_conditions: smallvec![Property::gather(tensor_id, i)],
+                        pre_conditions: smallvec![Property::gather(tensor_id, i), Property::AllowCommunication(tensor_id)],
                         post_conditions: smallvec![Property::gather(tensor_id, j)],
+                        negative_post_conditions: negative_post_conditions.clone(),
                         instruction: DInstruction::Communication(Collective::AllToAll(j, i))
                     });
                 }
@@ -999,6 +1008,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
                     Property::identity(node.inputs[2]),
                 ],
                 post_conditions: smallvec![Property::gather(node.outputs[0], dim)],
+                negative_post_conditions: vec![],
                 instruction: DInstruction::Op(op_id)
             });
         }
@@ -1011,6 +1021,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
                 Property::gather(node.inputs[2], 0),
             ],
             post_conditions: smallvec![Property::gather(node.outputs[0], rgraph[node.outputs[0]].n_dims() - 1)],
+            negative_post_conditions: vec![],
             instruction: DInstruction::Op(op_id)
         });
 
@@ -1025,6 +1036,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
             triples.add_triple(HoareTriple {
                 pre_conditions: smallvec![Property::gather(node.inputs[0], dim)],
                 post_conditions: smallvec![Property::gather(node.outputs[0], dim)],
+                negative_post_conditions: vec![],
                 instruction: DInstruction::Op(op_id)
             });
         }
@@ -1036,6 +1048,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
             triples.add_triple(HoareTriple {
                 pre_conditions: smallvec![Property::gather(node.inputs[0], dim)],
                 post_conditions: smallvec![Property::reduce(node.outputs[0])],
+                negative_post_conditions: vec![],
                 instruction: DInstruction::Op(op_id)
             });
         }
@@ -1043,9 +1056,10 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
         triples.add_triple(HoareTriple {
             pre_conditions: smallvec![Property::reduce(node.inputs[0])],
             post_conditions: smallvec![Property::reduce(node.outputs[0])],
+            negative_post_conditions: vec![],
             instruction: DInstruction::Op(op_id)
         });
     });
 
-    triples
+    (triples, default_properties)
 }
