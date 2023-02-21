@@ -219,9 +219,6 @@ struct Program {
     next_free_id: RTensorId,
 }
 
-
-
-
 impl Display for Program {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "length: {}, cost: {}, ecost: {}", self.triples.len(), self.cost, self.ecost)?;
@@ -319,12 +316,52 @@ impl ProgramHeapEntry {
     }
 }
 
+/// a helper struct to print the iteration count and the elapsed time
+struct Ticker {
+    iter_count: usize,
+    iter_per_print: usize,
+    start_time: std::time::Instant,
+}
+
+impl Ticker {
+    fn new(iter_per_print: usize) -> Self {
+        Ticker { iter_count: 0, iter_per_print, start_time: std::time::Instant::now() }
+    }
+
+    fn tick(&mut self) {
+        self.iter_count += 1;
+        if self.iter_count % self.iter_per_print == 0 {
+            eprintln!("{self}")
+        }
+    }
+}
+
+impl Display for Ticker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "iter count: {}, speed: {} iter/s",
+            self.iter_count,
+            self.iter_count as f64 / self.start_time.elapsed().as_secs_f64()
+        )
+    }
+}
+
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        eprintln!("{self}")
+    }
+}
+
 fn a_star(triples: &IndexedHoareTriples, profiler: &Profiler) -> Program {
     let mut heap = BinaryHeap::new();
-
     let mut best_program: Option<Program> = None;
+    let mut property_cache: BTreeMap<BTreeSet<Property>, f64> = BTreeMap::new();
 
     heap.push(ProgramHeapEntry::new(Program::default()));
+    property_cache.insert(BTreeSet::new(), 0.0);
+
+    let mut ticker = Ticker::new(5000);
 
     while let Some(ProgramHeapEntry { program, .. }) = heap.pop() {
         if CTRLC_RECEIVED.load(std::sync::atomic::Ordering::Relaxed) {
@@ -332,6 +369,10 @@ fn a_star(triples: &IndexedHoareTriples, profiler: &Profiler) -> Program {
         }
 
         if best_program.as_ref().map(|p| p.cost < program.cost).unwrap_or(false) {
+            continue;
+        }
+
+        if let Some(&cached_cost) = property_cache.get(&program.properties) && cached_cost < program.cost { // it has been superseded by a better program
             continue;
         }
 
@@ -343,9 +384,15 @@ fn a_star(triples: &IndexedHoareTriples, profiler: &Profiler) -> Program {
         } else {
             for triple_id in program.find_available_triples(triples) {
                 let new_program = program.with_a_new_triple(&triples[triple_id], profiler);
+                if let Some(&cached_cost) = property_cache.get(&new_program.properties) && cached_cost <= new_program.cost {
+                    continue
+                }
+                property_cache.insert(new_program.properties.clone(), new_program.cost);
                 heap.push(ProgramHeapEntry::new(new_program));
             }
         }
+
+        ticker.tick();
     }
 
     eprintln!("===== Result =====\n\n{}", best_program.as_ref().unwrap());
@@ -969,7 +1016,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> IndexedHoareTrip
 
         // reduction?
         // this requires arithemetic replacement (change to matmul + allreduce + add)
-        // we also hit Rust alias rule here as the loop already borrows the graph
+        // we also hit Rust aliasing rule here as the loop already borrows the graph
     });
 
     // Sigmoid

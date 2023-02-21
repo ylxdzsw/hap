@@ -77,48 +77,6 @@ def load(file: str) -> ...:
     with open(file, 'rb') as f:
         return pickle.load(f)
 
-def graph_to_dot(graph, strategy):
-    import operator
-    import torch
-
-    form_dict = {}
-    for node in graph.nodes:
-        if node.name not in strategy.keys():
-            continue
-        form_dict[node.name] = strategy[node.name][1]
-        for k, v in node.meta['arg_dict'].items():
-            if not isinstance(v, torch.fx.node.Node) or v.name in form_dict.keys():
-                continue
-            form_dict[v.name] = strategy[node.name][0][k]
-
-    dot = ""
-
-    def resolve(node):
-        if node.target in (operator.getitem, torch.transpose, torch.Tensor.transpose, torch.relu, "transpose", "contiguous", "view", "clone"):
-            return resolve(list(node.all_input_nodes)[0])
-        elif node.target in (getattr,):
-            return None
-        else:
-            return node
-
-    def format_node(node):
-        s = ""
-        if node.name in form_dict.keys():
-            s = form_dict[node.name]
-        return f"{node.name}: {s}"
-
-    for node in graph.nodes:
-        if resolve(node) == node:
-            for arg in node.all_input_nodes:
-                resolved = resolve(arg)
-                if resolved == None:
-                    continue
-                dot += f"""
-                    "{format_node(resolved)}" -> "{format_node(node)}"
-                """
-
-    return f"digraph strategy {{{dot}}}"
-
 # a helper function to use in Rust side
 def get_shape_of_param_or_buffer(graph_module, node):
     try:
