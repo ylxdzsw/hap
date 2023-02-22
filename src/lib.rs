@@ -128,12 +128,12 @@ impl Display for HoareTriple {
             }
             write!(f, "{p}")?;
         }
-        // for (i, p) in self.negative_post_conditions.iter().enumerate() {
-        //     if i > 0 || !self.post_conditions.is_empty() {
-        //         write!(f, ", ")?;
-        //     }
-        //     write!(f, "¬({p})")?;
-        // }
+        for (i, p) in self.negative_post_conditions.iter().enumerate() {
+            if i > 0 || !self.post_conditions.is_empty() {
+                write!(f, ", ")?;
+            }
+            write!(f, "¬({p})")?;
+        }
         write!(f, "}}")?;
         Ok(())
     }
@@ -202,7 +202,7 @@ enum ShardingForm {
 // An Instruction without the input and output information
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DInstruction {
-    Op(OpId), // we use the name "op" to refer to a pytorch operator with non-tensor parameters filled in
+    Op(OpId),
     GetAttr(ParameterId, ShardingForm),
     Placeholder(PlaceholderId, ShardingForm),
     Output,
