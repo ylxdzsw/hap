@@ -158,12 +158,12 @@ impl Display for HoareTriple {
             }
             write!(f, "{p}")?;
         }
-        for (i, p) in self.negative_post_conditions.iter().enumerate() {
-            if i > 0 || !self.post_conditions.is_empty() {
-                write!(f, ", ")?;
-            }
-            write!(f, "¬({p})")?;
-        }
+        // for (i, p) in self.negative_post_conditions.iter().enumerate() {
+        //     if i > 0 || !self.post_conditions.is_empty() {
+        //         write!(f, ", ")?;
+        //     }
+        //     write!(f, "¬({p})")?;
+        // }
         write!(f, "}}")?;
         Ok(())
     }
