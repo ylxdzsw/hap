@@ -41,9 +41,26 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         default_properties.extend(heuristics::ordered_placeholder(&mut triples, &rgraph));
         default_properties.extend(heuristics::ordered_get_attr(&mut triples, &rgraph));
 
-        eprintln!("triples: {triples:#?}");
+        // for triple in triples.iter() {
+        //     eprintln!("{triple}");
+        // }
 
-        a_star(&triples, &default_properties, &Profiler);
+        let cluster_info = ClusterInfo {
+            n_devices: 4,
+            device_flops: vec![4139214925014.; 4],
+            all_reduce_bandwidth: 611692856.,
+            all_gather_bandwidth: 1224592728.,
+            reduce_scatter_bandwidth: 1130230706.,
+            all_to_all_bandwidth: 10701240728.
+        };
+
+        let profiler = Profiler {
+            rgraph: &rgraph,
+            module_info: &module_info,
+            cluster_info: &cluster_info
+        };
+
+        a_star(&triples, &default_properties, &profiler);
         Ok(PyList::new(py, &[]))
     }))?;
 
@@ -104,6 +121,19 @@ pub enum Collective {
     DynamicSlice(u8)
 }
 
+impl Collective {
+    fn conjugate(self) -> Option<Self> {
+        match self {
+            Collective::AllGather(dim) => Some(Collective::ReduceScatter(dim)),
+            Collective::AllReduce => Some(Collective::AllReduce),
+            Collective::ReduceScatter(dim) => Some(Collective::AllGather(dim)),
+            Collective::AllToAll(split_dim, cat_dim) => Some(Collective::AllToAll(cat_dim, split_dim)),
+            Collective::Replicate => Some(Collective::AllReduce),
+            Collective::DynamicSlice(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HoareTriple {
     pre_conditions: SVec<Property>,
@@ -143,6 +173,7 @@ impl Display for HoareTriple {
 pub enum Property {
     HasTensor(RTensorId, TensorRelation),
     Finished,
+
     AllowCommunication(RTensorId),
     AllowPlaceholder(PlaceholderId),
     AllowGetAttr(ParameterId),
@@ -209,14 +240,26 @@ enum DInstruction {
     Communication(Collective)
 }
 
-impl DInstruction {
-    fn get_cost(&self, profiler: &Profiler) -> f64 {
-        match self {
-            DInstruction::Op(_) => 1.0,
-            DInstruction::GetAttr(_, _) => 0.1,
-            DInstruction::Placeholder(_, _) => 0.1,
-            DInstruction::Output => 0.1,
-            DInstruction::Communication(_) => 1.0,
+impl HoareTriple {
+    fn get_cost(&self, profiler: &Profiler, sharding_ratio: &[f64]) -> f64 {
+        match self.instruction {
+            DInstruction::Op(op_id) => {
+                3. * profiler.get_computation_time(&self, &profiler.module_info[op_id], sharding_ratio)
+            },
+            DInstruction::GetAttr(_, _) => 1e-6,
+            DInstruction::Placeholder(_, _) => 1e-6,
+            DInstruction::Output => 1e-6,
+            DInstruction::Communication(c) => {
+                let original_size = if let Property::HasTensor(tensor_id, _) = self.pre_conditions[0] { // TODO: how to properly get the shape information?
+                    profiler.rgraph[tensor_id].size() as f64
+                } else {
+                    unreachable!()
+                };
+
+                let maximum_size = original_size * sharding_ratio.iter().cloned().map(FloatOrd).max().unwrap().0;
+
+                profiler.get_collective_time(maximum_size, c) + c.conjugate().map(|c| profiler.get_collective_time(maximum_size, c)).unwrap_or(0.0)
+            },
         }
     }
 }
@@ -233,7 +276,35 @@ impl Display for DInstruction {
     }
 }
 
-struct Profiler;
+#[derive(Debug, Clone)]
+struct Profiler<'r, 'm, 'c> {
+    rgraph: &'r RGraph,
+    module_info: &'m ModuleInfo,
+    cluster_info: &'c ClusterInfo,
+}
+
+impl<'r, 'm, 'c> Profiler<'r, 'm, 'c> {
+    fn get_collective_time(&self, size: f64, collective: Collective) -> f64 {
+        match collective {
+            Collective::AllReduce => size / self.cluster_info.all_reduce_bandwidth,
+            Collective::AllGather(_) => size / self.cluster_info.all_gather_bandwidth,
+            Collective::AllToAll(_, _) => size / self.cluster_info.all_to_all_bandwidth,
+            Collective::ReduceScatter(_) => size / self.cluster_info.reduce_scatter_bandwidth,
+            Collective::DynamicSlice(_) => 0.,
+            Collective::Replicate => 0.
+        }
+    }
+
+    fn get_computation_time(&self, triple: &HoareTriple, op: &Op, sharding_ratio: &[f64]) -> f64 {
+        let sharded = triple.pre_conditions.iter().any(|p| matches!(p, Property::HasTensor(_, TensorRelation::Gather(_))));
+        let time_on_devices = (0..self.cluster_info.n_devices).map(|device_index| {
+            let flops = (op.flops)() * sharded.then(|| sharding_ratio[device_index]).unwrap_or(1.);
+            flops / self.cluster_info.device_flops[device_index]
+        });
+
+        time_on_devices.map(FloatOrd).max().unwrap().0
+    }
+}
 
 #[derive(Default, Debug, Clone)]
 struct Program {
@@ -274,7 +345,7 @@ impl Program {
             .cloned()
             .collect();
 
-        let cost = self.cost + triple.instruction.get_cost(profiler);
+        let cost = self.cost + triple.get_cost(profiler, &[0.25; 4]);
         let ecost = 0.0;
 
         Program { triples, properties, cost, ecost }
@@ -434,7 +505,7 @@ fn a_star(triples: &[HoareTriple], initial_properties: &[Property], profiler: &P
             continue;
         }
 
-        // eprintln!("{program}");
+        eprintln!("{program}");
         if program.is_complete() {
             if best_program.as_ref().map(|p| p.cost > program.cost).unwrap_or(true) {
                 best_program = Some(program);
@@ -524,6 +595,10 @@ impl RTensor {
     fn n_dims(&self) -> u8 {
         self.shape.len() as _
     }
+
+    fn size(&self) -> usize {
+        self.shape.iter().product()
+    }
 }
 
 impl Index<RNodeId> for RGraph {
@@ -561,7 +636,7 @@ struct OpCodegenContext<'py> {
 struct Op {
     py_name: String,
     codegen: Box<dyn Fn(&mut OpCodegenContext)>,
-    // profile: Box<dyn Fn(&mut OpProfileContext)>
+    flops: Box<dyn Fn() -> f64>, // todo
 }
 
 impl Debug for Op {
@@ -634,7 +709,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         ctx.graph.tensors.push(RTensor {
             producer: node_id,
             consumers: smallvec![],
-            shape: output_shape.into(),
+            shape: output_shape.clone().into(),
             communicatable: true
         });
 
@@ -648,6 +723,12 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
             py_name: "torch.nn.functional.linear".to_string(),
             codegen: Box::new(|ctx: &mut OpCodegenContext| {
                 todo!()
+            }),
+            flops: Box::new({
+                let reduction_length = ctx.graph[input_input_tensor_id].shape.last().copied().unwrap();
+                move || {
+                    3. * output_shape.iter().product::<usize>() as f64 * reduction_length as f64
+                }
             })
         });
 
@@ -690,6 +771,12 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
             py_name: "torch.sigmoid".to_string(),
             codegen: Box::new(|ctx: &mut OpCodegenContext| {
                 todo!()
+            }),
+            flops: Box::new({
+                let size = ctx.graph[input_input_tensor_id].shape.iter().product::<usize>();
+                move || {
+                    3. * size as f64
+                }
             })
         });
 
@@ -732,6 +819,12 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
             py_name: "torch.sum".to_string(),
             codegen: Box::new(|ctx: &mut OpCodegenContext| {
                 todo!()
+            }),
+            flops: Box::new({
+                let size = ctx.graph[input_input_tensor_id].shape.iter().product::<usize>();
+                move || {
+                    size as f64
+                }
             })
         });
 
@@ -902,14 +995,14 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                 let tensor_id = node.outputs[0];
 
                 add_triple(
-                    smallvec![Property::AllowPlaceholder(placeholder_id)],
+                    smallvec![],
                     smallvec![Property::identity(tensor_id)],
                     DInstruction::Placeholder(placeholder_id, ShardingForm::Unsharded)
                 );
 
                 for dim in 0..rgraph[tensor_id].n_dims() {
                     add_triple(
-                        smallvec![Property::AllowPlaceholder(placeholder_id)],
+                        smallvec![],
                         smallvec![Property::gather(tensor_id, dim)],
                         DInstruction::Placeholder(placeholder_id, ShardingForm::Sharded(dim))
                     );
@@ -920,14 +1013,14 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                 let tensor_id = node.outputs[0];
 
                 add_triple(
-                    smallvec![Property::AllowGetAttr(parameter_id)],
+                    smallvec![],
                     smallvec![Property::identity(tensor_id)],
                     DInstruction::GetAttr(parameter_id, ShardingForm::Unsharded)
                 );
 
                 for dim in 0..rgraph[tensor_id].n_dims() {
                     add_triple(
-                        smallvec![Property::AllowGetAttr(parameter_id)],
+                        smallvec![],
                         smallvec![Property::gather(tensor_id, dim)],
                         DInstruction::GetAttr(parameter_id, ShardingForm::Sharded(dim))
                     );
@@ -1134,6 +1227,16 @@ mod heuristics {
         }
         default_properties
     }
+}
+
+#[derive(Debug)]
+struct ClusterInfo {
+    n_devices: usize,
+    device_flops: Vec<f64>,
+    all_reduce_bandwidth: f64,
+    all_gather_bandwidth: f64,
+    all_to_all_bandwidth: f64,
+    reduce_scatter_bandwidth: f64,
 }
 
 
