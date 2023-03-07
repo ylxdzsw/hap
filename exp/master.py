@@ -7,7 +7,7 @@ import hetspmd
 from utils import *
 
 model = symbolic_trace(config.get_model(seed=39))
-print(model.code)
+print(model.code, flush=True)
 
 for i, node in enumerate(model.graph.nodes):
     node.meta['id'] = i

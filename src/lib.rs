@@ -2,7 +2,7 @@
 #![allow(non_upper_case_globals)]
 #![feature(let_chains)]
 
-use std::ops::{Index, IndexMut};
+use std::ops::{Index, IndexMut, Add};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -37,11 +37,10 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         let mut triples = analyze_rgraph(&rgraph);
         let mut default_properties = vec![];
 
-        // heuristics::compute_only_once(&mut triples, &mut default_properties, &rgraph);
-        // heuristics::ordered_communication(&mut triples, &mut default_properties, &rgraph);
-        // heuristics::fuse_communication_forward(&mut triples, &mut default_properties, &rgraph);
-        // heuristics::ordered_placeholder_chain(&mut triples, &mut default_properties, &rgraph);
-        // heuristics::ordered_get_attr_chain(&mut triples, &mut default_properties, &rgraph);
+        heuristics::unique_computation(&mut triples, &mut default_properties);
+        heuristics::unique_communication(&mut triples, &mut default_properties);
+        // heuristics::fuse_free_triple(&mut triples, &mut default_properties);
+        heuristics::fuse_communication(&mut triples, &mut default_properties);
 
         // for triple in triples.iter() {
         //     eprintln!("{triple}");
@@ -123,8 +122,8 @@ pub struct HoareTriple {
     post_conditions: SVec<Property>,
     negative_post_conditions: Vec<Property>,
     instruction: String, // for debugging purpose
-    codegen: Box<dyn Fn(&mut CodegenContext) -> PyResult<()>>,
-    profile: Box<dyn Fn(&mut ProfileContext) -> (Profile, Profile)>
+    codegen: Rc<dyn Fn(&mut CodegenContext) -> PyResult<()>>,
+    profile: Rc<dyn Fn(&mut ProfileContext) -> (Profile, Profile)>
 }
 
 impl Display for HoareTriple {
@@ -160,9 +159,7 @@ pub enum Property {
     Finished,
 
     AllowCommunication(RTensorId),
-    // AllowPlaceholder(PlaceholderId),
-    // AllowGetAttr(ParameterId),
-    // AllowComputation(OpId), // or RNodeId?
+    AllowComputation(RTensorId), // also includes placeholder and getattr
 }
 
 impl Display for Property {
@@ -175,15 +172,9 @@ impl Display for Property {
             Property::AllowCommunication(tensor_id) => {
                 write!(f, "{}|allow_communication", tensor_id)
             }
-            // Property::AllowPlaceholder(placeholder_id) => {
-            //     write!(f, "{}|allow_placeholder", placeholder_id)
-            // }
-            // Property::AllowGetAttr(parameter_id) => {
-            //     write!(f, "{}|allow_get_attr", parameter_id)
-            // }
-            // Property::AllowComputation(op_id) => {
-            //     write!(f, "{}|allow_computation", op_id)
-            // }
+            Property::AllowComputation(tensor_id) => {
+                write!(f, "{}|allow_computation", tensor_id)
+            }
         }
     }
 }
@@ -210,45 +201,71 @@ pub enum TensorRelation {
 }
 
 impl HoareTriple {
-    fn get_cost(&self, profiler: &Profiler, sharding_ratio: &[f64]) -> f64 {
-        const epsilon: f64 = 1e-6;
+    fn get_cost(&self, profiler: &Profiler, sharding_ratios: &[f64]) -> f64 {
+        let (computation_times, communication_times): (Vec<_>, Vec<_>) = (0..sharding_ratios.len()).map(|i| {
+            // TODO: a lot of unnecessary work. Need benchmark.
+            let mut profile_context = ProfileContext {
+                profiler,
+                sharding_ratios,
+                device_index: i,
+            };
+            let (forward, backward) = (self.profile)(&mut profile_context);
+            let computation_time = (forward.flops + backward.flops) / profiler.cluster_info.device_flops[i];
+            let communication_time =
+                (forward.all_gather + backward.all_gather) / profiler.cluster_info.all_gather_bandwidth +
+                (forward.all_reduce + backward.all_reduce) / profiler.cluster_info.all_reduce_bandwidth +
+                (forward.reduce_scatter + backward.reduce_scatter) / profiler.cluster_info.reduce_scatter_bandwidth +
+                (forward.all_to_all + backward.all_to_all) / profiler.cluster_info.all_to_all_bandwidth;
 
-        // self.instructions.iter().map(|inst| match *inst {
-        //     DInstruction::Op(op_id) => {
-        //         3. * profiler.get_computation_time(&self, &profiler.module_info[op_id], sharding_ratio)
-        //     },
-        //     DInstruction::GetAttr(_, sharding_form) => {
-        //         match sharding_form {
-        //             ShardingForm::Sharded(_) => epsilon,
-        //             ShardingForm::Unsharded => {
-        //                 // additional all-reduce for gradient
-        //                 let size = if let Property::HasTensor(tensor_id, _) = self.post_conditions[0] { // TODO: how to properly get the shape information?
-        //                     profiler.rgraph[tensor_id].size() as f64
-        //                 } else {
-        //                     unreachable!()
-        //                 };
+            (computation_time, communication_time)
+        }).unzip();
 
-        //                 profiler.get_collective_time(size, Collective::AllReduce)
-        //             },
-        //         }
-        //     },
-        //     DInstruction::Placeholder(_, _) => epsilon,
-        //     DInstruction::Output => epsilon,
-        //     DInstruction::Communication(c) => {
-        //         let original_size = if let Property::HasTensor(tensor_id, _) = self.pre_conditions.last().cloned().unwrap() { // TODO: how to properly get the shape information?
-        //             profiler.rgraph[tensor_id].size() as f64
-        //         } else {
-        //             unreachable!()
-        //         };
+        computation_times.into_iter().map(FloatOrd).max().unwrap().0 + communication_times.into_iter().map(FloatOrd).max().unwrap().0
+    }
 
-        //         let maximum_size = original_size * sharding_ratio.iter().cloned().map(FloatOrd).max().unwrap().0;
+    fn fuse_into(&self, consumer: &HoareTriple) -> HoareTriple {
+        for negative_post_condition in self.negative_post_conditions.iter() {
+            assert!(!consumer.pre_conditions.contains(&negative_post_condition));
+        }
 
-        //         profiler.get_collective_time(maximum_size, c) + profiler.get_collective_time(maximum_size, c.conjugate())
-        //     },
-        //     DInstruction::DynamicSlice(_) => epsilon,
-        // }).sum()
+        let pre_conditions = self.pre_conditions.iter().chain(
+            consumer.pre_conditions.iter()
+                .filter(|c| !self.pre_conditions.contains(c) && !self.post_conditions.contains(c))
+        ).cloned().collect();
 
-        epsilon
+        let post_conditions = self.post_conditions.iter().chain(consumer.post_conditions.iter()).cloned().collect();
+
+        let negative_post_conditions = self.negative_post_conditions.iter().chain(consumer.negative_post_conditions.iter()).cloned().collect();
+
+        let instruction = format!("{}, {}", self.instruction, consumer.instruction);
+
+        let codegen = {
+            let self_codegen = self.codegen.clone();
+            let consumer_codegen = consumer.codegen.clone();
+            Rc::new(move |ctx: &mut CodegenContext| {
+                self_codegen(ctx)?;
+                consumer_codegen(ctx)
+            })
+        };
+
+        let profile = {
+            let self_profile = self.profile.clone();
+            let consumer_profile = consumer.profile.clone();
+            Rc::new(move |ctx: &mut ProfileContext| {
+                let (forward1, backward1) = self_profile(ctx);
+                let (forward2, backward2) = consumer_profile(ctx);
+                (forward1 + forward2, backward1 + backward2)
+            })
+        };
+
+        HoareTriple {
+            pre_conditions,
+            post_conditions,
+            negative_post_conditions,
+            instruction,
+            codegen,
+            profile
+        }
     }
 }
 
@@ -257,24 +274,6 @@ struct Profiler<'r, 'c> {
     rgraph: &'r RGraph,
     cluster_info: &'c ClusterInfo,
 }
-
-impl<'r, 'c> Profiler<'r, 'c> {
-    fn get_time(&self, profile: &Profile, sharding_ratios: &[f64]) -> f64 {
-        let computation_time = self.cluster_info.device_flops.iter().zip(sharding_ratios)
-            .map(|(device_flops, ratio)| profile.flops * ratio / device_flops)
-            .map(FloatOrd).max().unwrap().0;
-
-        let maximum_ratio = sharding_ratios.iter().cloned().map(FloatOrd).max().unwrap().0;
-        let communication_time =
-            profile.all_gather * maximum_ratio / self.cluster_info.all_gather_bandwidth +
-            profile.all_reduce * maximum_ratio / self.cluster_info.all_reduce_bandwidth +
-            profile.all_to_all * maximum_ratio / self.cluster_info.all_to_all_bandwidth +
-            profile.reduce_scatter * maximum_ratio / self.cluster_info.reduce_scatter_bandwidth;
-
-        computation_time + communication_time
-    }
-}
-
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Profile {
@@ -285,10 +284,24 @@ struct Profile {
     reduce_scatter: f64,
 }
 
+impl Add for Profile {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        Profile {
+            flops: self.flops + rhs.flops,
+            all_reduce: self.all_reduce + rhs.all_reduce,
+            all_gather: self.all_gather + rhs.all_gather,
+            all_to_all: self.all_to_all + rhs.all_to_all,
+            reduce_scatter: self.reduce_scatter + rhs.reduce_scatter,
+        }
+    }
+}
 
 struct ProfileContext<'p, 's, 'r, 'c> {
     profiler: &'p Profiler<'r, 'c>,
     sharding_ratios: &'s [f64],
+    device_index: usize
 }
 
 impl<'p, 's, 'r, 'c> ProfileContext<'p, 's, 'r, 'c> {
@@ -300,7 +313,7 @@ impl<'p, 's, 'r, 'c> ProfileContext<'p, 's, 'r, 'c> {
                 TensorRelation::Gather(dim) => {
                     let dim = dim as usize;
                     let mut shape = raw_shape.clone();
-                    shape[dim] = sharding_round(shape[dim], self.sharding_ratios)[dim];
+                    shape[dim] = sharding_round(shape[dim], self.sharding_ratios)[self.device_index];
                     shape
                 }
             }
@@ -1018,7 +1031,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
         });
     };
 
-    // basics: Placeholder, GetAttr, Output, and identity for ops
+    // Placeholder, GetAttr, Output
     for (node_id, node) in rgraph.nodes.iter().enumerate() {
         let node_id = RNodeId(node_id);
 
@@ -1030,7 +1043,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     smallvec![],
                     smallvec![Property::identity(tensor_id)],
                     format!("placeholder_unsharded(\"{placeholder_name}\")"),
-                    Box::new({
+                    Rc::new({
                         let placeholder_name = placeholder_name.clone();
                         move |ctx| {
                             let py_result = ctx.fx_placeholder(&placeholder_name)?;
@@ -1038,7 +1051,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                             Ok(())
                         }
                     }),
-                    Box::new(|ctx| Default::default())
+                    Rc::new(|ctx| Default::default())
                 );
 
                 for (dim, &length) in rgraph[tensor_id].shape.iter().enumerate() {
@@ -1048,7 +1061,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         smallvec![],
                         smallvec![Property::gather(tensor_id, dim)],
                         format!("placeholder_shard(\"{placeholder_name}\", dim={dim}])"),
-                        Box::new({
+                        Rc::new({
                             let placeholder_name = placeholder_name.clone();
                             move |ctx| {
                                 let py_complete_placeholder = ctx.fx_placeholder(&placeholder_name)?;
@@ -1059,7 +1072,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                                 Ok(())
                             }
                         }),
-                        Box::new(|ctx| { Default::default() })
+                        Rc::new(|ctx| { Default::default() })
                     );
                 }
             }
@@ -1071,7 +1084,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     smallvec![],
                     smallvec![Property::identity(tensor_id)],
                     format!("get_attr_unsharded(\"{parameter_name}\")"),
-                    Box::new({
+                    Rc::new({
                         let parameter_name = parameter_name.clone();
                         move |ctx| {
                             let py_result = ctx.fx_get_attr(&parameter_name)?;
@@ -1079,7 +1092,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                             Ok(())
                         }
                     }),
-                    Box::new({
+                    Rc::new({
                         let parameter_name = parameter_name.clone();
                         move |ctx| {
                             let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
@@ -1097,10 +1110,10 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         smallvec![],
                         smallvec![Property::gather(tensor_id, dim)],
                         format!("get_attr_shard(\"{parameter_name}\", dim={dim}])"),
-                        Box::new(|ctx| {
+                        Rc::new(|ctx| {
                             todo!() // we need to actually shard the model here
                         }),
-                        Box::new(|ctx| { Default::default() })
+                        Rc::new(|ctx| { Default::default() })
                     );
                 }
             }
@@ -1112,12 +1125,12 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     smallvec![Property::reduce(tensor_id)],
                     smallvec![Property::Finished],
                     format!("output"),
-                    Box::new(move |ctx| {
+                    Rc::new(move |ctx| {
                         let py_input = ctx.get_property_implementation(Property::reduce(tensor_id));
                         ctx.fx_output(py_input)?;
                         Ok(())
                     }),
-                    Box::new(|ctx| { Default::default() })
+                    Rc::new(|ctx| { Default::default() })
                 );
             }
 
@@ -1138,8 +1151,8 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 smallvec![Property::gather(tensor_id, dim)],
                 smallvec![Property::identity(tensor_id)],
                 format!("all_gather(dim={dim})"),
-                Box::new(move |ctx| { todo!() }),
-                Box::new(move |ctx| {
+                Rc::new(move |ctx| { todo!() }),
+                Rc::new(move |ctx| {
                     let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                     let forward_profile = Profile { all_gather: size as f64, ..Default::default() };
                     let backward_profile = Profile { reduce_scatter: size as f64, ..Default::default() };
@@ -1151,16 +1164,16 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 smallvec![Property::identity(tensor_id)],
                 smallvec![Property::gather(tensor_id, dim)],
                 format!("dynamic_slice(dim={dim})"),
-                Box::new(move |ctx| { todo!() }),
-                Box::new(move |ctx| { Default::default() })
+                Rc::new(move |ctx| { todo!() }),
+                Rc::new(move |ctx| { Default::default() })
             );
 
             add_triple(
                 smallvec![Property::reduce(tensor_id)],
                 smallvec![Property::gather(tensor_id, dim)],
                 format!("reduce_scatter(dim={dim})"),
-                Box::new(move |ctx| { todo!() }),
-                Box::new(move |ctx| {
+                Rc::new(move |ctx| { todo!() }),
+                Rc::new(move |ctx| {
                     let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                     let forward_profile = Profile { reduce_scatter: size as f64, ..Default::default() };
                     let backward_profile = Profile { all_gather: size as f64, ..Default::default() };
@@ -1173,8 +1186,8 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
             smallvec![Property::reduce(tensor_id)],
             smallvec![Property::identity(tensor_id)],
             format!("all_reduce"),
-            Box::new(move |ctx| { todo!() }),
-            Box::new(move |ctx| {
+            Rc::new(move |ctx| { todo!() }),
+            Rc::new(move |ctx| {
                 let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                 let forward_profile = Profile { all_reduce: size as f64, ..Default::default() };
                 let backward_profile = Profile { all_reduce: size as f64, ..Default::default() };
@@ -1189,8 +1202,8 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         smallvec![Property::gather(tensor_id, i)],
                         smallvec![Property::gather(tensor_id, j)],
                         format!("all_to_all(cat={i}, split={j})"),
-                        Box::new(move |ctx| { todo!() }),
-                        Box::new(move |ctx| {
+                        Rc::new(move |ctx| { todo!() }),
+                        Rc::new(move |ctx| {
                             let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                             let forward_profile = Profile { all_to_all: size as f64, ..Default::default() };
                             let backward_profile = Profile { all_to_all: size as f64, ..Default::default() };
@@ -1218,7 +1231,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
             pre_conditions.clone(),
             post_conditions.clone(),
             op.py_name.clone(),
-            Box::new({
+            Rc::new({
                 let op = op.clone();
                 let pre_conditions = pre_conditions.clone();
                 move |ctx| {
@@ -1230,7 +1243,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     Ok(())
                 }
             }),
-            Box::new(move |ctx| {
+            Rc::new(move |ctx| {
                 let shapes: Vec<_> = pre_conditions.iter().map(|p| ctx.get_shape_by_property(*p)).collect();
                 let flops = (op.flops)(&shapes);
                 let forward_profile = Profile { flops, ..Default::default() };
@@ -1323,113 +1336,95 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
 mod heuristics {
     use super::*;
 
-    // each Op can only be computed once
-    // pub fn compute_only_once(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>, _rgraph: &RGraph) {
-    //     for triple in triples {
-    //         if let [DInstruction::Op(op_id)] = triple.instructions[..] {
-    //             triple.pre_conditions.push(Property::AllowComputation(op_id));
-    //             triple.negative_post_conditions.push(Property::AllowComputation(op_id));
-    //             default_properties.push(Property::AllowComputation(op_id));
-    //         }
-    //     }
-    // }
+    fn get_rtensor_ids_from_conditions(conditions: &[Property]) -> Vec<RTensorId> {
+        conditions.iter()
+            .flat_map(|p| if let Property::HasTensor(tensor_id, _) = *p {
+                Some(tensor_id)
+            } else {
+                None
+            })
+            .collect()
+    }
 
-    // communication must happen in order
-    // pub fn ordered_communication(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>, rgraph: &RGraph) {
-    //     for triple in triples {
-    //         if let [DInstruction::Communication(_)] = triple.instructions[..] {
-    //             if let Property::HasTensor(tensor_id, _) = triple.post_conditions[0] {
-    //                 triple.pre_conditions.push(Property::AllowCommunication(tensor_id));
-    //                 for i in 0..=tensor_id.0 {
-    //                     if rgraph[RTensorId(i)].communicatable {
-    //                         triple.negative_post_conditions.push(Property::AllowCommunication(RTensorId(i)));
-    //                     }
-    //                 }
-    //                 default_properties.push(Property::AllowCommunication(tensor_id));
-    //             } else {
-    //                 unreachable!();
-    //             }
-    //         }
-    //     }
-    // }
+    /// only allow up to one communication per rtensor
+    pub fn unique_communication(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>) {
+        for triple in triples {
+            let input_tensor_ids = get_rtensor_ids_from_conditions(&triple.pre_conditions);
+            let output_tensor_ids = get_rtensor_ids_from_conditions(&triple.post_conditions);
 
-    // placeholder must happen in order
-    // pub fn ordered_placeholder(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>, rgraph: &RGraph) {
-    //     for triple in triples {
-    //         if let [DInstruction::Placeholder(placeholder_id, _)] = triple.instructions[..] {
-    //             triple.pre_conditions.push(Property::AllowPlaceholder(placeholder_id));
-    //             for i in 0..=placeholder_id.0 {
-    //                 triple.negative_post_conditions.push(Property::AllowPlaceholder(PlaceholderId(i)));
-    //             }
-    //             default_properties.push(Property::AllowPlaceholder(placeholder_id));
-    //         }
-    //     }
-    // }
+            if input_tensor_ids.len() == 1 && output_tensor_ids.len() == 1 && input_tensor_ids[0] == output_tensor_ids[0] {
+                triple.pre_conditions.push(Property::AllowCommunication(input_tensor_ids[0]));
+                triple.negative_post_conditions.push(Property::AllowCommunication(input_tensor_ids[0]));
+                default_properties.push(Property::AllowCommunication(input_tensor_ids[0]));
+            }
+        }
+    }
 
-    // placeholder must happen in order, alternative implementation
-    // pub fn ordered_placeholder_chain(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>, rgraph: &RGraph) {
-    //     for triple in triples {
-    //         if let [DInstruction::Placeholder(placeholder_id, _)] = triple.instructions[..] {
-    //             triple.pre_conditions.push(Property::AllowPlaceholder(placeholder_id));
-    //             triple.post_conditions.push(Property::AllowPlaceholder(placeholder_id + 1));
-    //             triple.negative_post_conditions.push(Property::AllowPlaceholder(placeholder_id));
-    //         }
-    //     }
-    //     default_properties.push(Property::AllowPlaceholder(PlaceholderId(0)))
-    // }
+    pub fn unique_computation(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>) {
+        for triple in triples {
+            let input_tensor_ids = get_rtensor_ids_from_conditions(&triple.pre_conditions);
+            let output_tensor_ids = get_rtensor_ids_from_conditions(&triple.post_conditions);
 
-    // get attr must happen in order
-    // pub fn ordered_get_attr(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>, rgraph: &RGraph) {
-    //     for triple in triples {
-    //         if let [DInstruction::GetAttr(parameter_id, _)] = triple.instructions[..] {
-    //             triple.pre_conditions.push(Property::AllowGetAttr(parameter_id));
-    //             for i in 0..=parameter_id.0 {
-    //                 triple.negative_post_conditions.push(Property::AllowGetAttr(ParameterId(i)));
-    //             }
-    //             default_properties.push(Property::AllowGetAttr(parameter_id));
-    //         }
-    //     }
-    // }
+            if output_tensor_ids.iter().all(|tensor_id| !input_tensor_ids.contains(tensor_id)) {
+                for tensor_id in output_tensor_ids {
+                    triple.pre_conditions.push(Property::AllowComputation(tensor_id));
+                    triple.negative_post_conditions.push(Property::AllowComputation(tensor_id));
+                    default_properties.push(Property::AllowComputation(tensor_id));
+                }
+            }
+        }
+    }
 
-    // get attr must happen in order, alternative implementation
-    // pub fn ordered_get_attr_chain(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>, rgraph: &RGraph) {
-    //     for triple in triples {
-    //         if let [DInstruction::GetAttr(parameter_id, _)] = triple.instructions[..] {
-    //             triple.pre_conditions.push(Property::AllowGetAttr(parameter_id));
-    //             triple.post_conditions.push(Property::AllowGetAttr(parameter_id + 1));
-    //             triple.negative_post_conditions.push(Property::AllowGetAttr(parameter_id));
-    //         }
-    //     }
-    //     default_properties.push(Property::AllowGetAttr(ParameterId(0)))
-    // }
+    /// fuse free triples into its consumers. Free triples are those have no tensor input (Placeholder and GetAttr)
+    pub fn fuse_free_triple(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>) {
+        let mut i = 0;
+        while i < triples.len() {
+            let input_tensor_ids = get_rtensor_ids_from_conditions(&triples[i].pre_conditions);
+            let output_tensor_ids = get_rtensor_ids_from_conditions(&triples[i].post_conditions);
 
-    // fuse communication triples into its consumer
-    // pub fn fuse_communication_forward(triples: &mut Vec<HoareTriple>, _default_properties: &mut Vec<Property>, _rgraph: &RGraph) {
-    //     let mut i = 0;
-    //     while i < triples.len() {
-    //         if let [DInstruction::Communication(_)] = triples[i].instructions[..] {
-    //             let communication_triple = triples.remove(i); // TODO: swap_remove for performance?
-    //             assert_eq!(communication_triple.post_conditions.len(), 1);
-    //             assert_eq!(communication_triple.negative_post_conditions.len(), 0);
-    //             // can make index here if the number of triples is huge
-    //             for triple in triples.iter_mut() {
-    //                 // TODO: integreate with the ordered_communication heuristic?
-    //                 if triple.instructions.iter().any(|x| matches!(x, DInstruction::Communication(_))) {
-    //                     continue;
-    //                 }
+            if input_tensor_ids.is_empty() && output_tensor_ids.len() == 1 { // free triple
+                let free_triple = triples.remove(i); // idea: swap_remove for performance?
+                let output_property = *free_triple.post_conditions.iter().find(|x| matches!(x, Property::HasTensor(_, _))).unwrap();
 
-    //                 if triple.pre_conditions.contains(&communication_triple.post_conditions[0]) {
-    //                     triple.pre_conditions.extend(communication_triple.pre_conditions.clone());
-    //                     triple.pre_conditions.retain(|x| x != &communication_triple.post_conditions[0]);
-    //                     triple.post_conditions.push(communication_triple.post_conditions[0]);
-    //                     triple.instructions.insert(0, communication_triple.instructions[0]);
-    //                 }
-    //             }
-    //         } else {
-    //             i += 1
-    //         }
-    //     }
-    // }
+                // idea: can make index here if the number of triples is huge
+
+                let mut j = 0;
+                while j < triples.len() {
+                    let triple = &triples[j];
+                    if triple.pre_conditions.contains(&output_property) && free_triple.negative_post_conditions.iter().all(|x| !triple.pre_conditions.contains(x)) {
+                        triples.push(free_triple.fuse_into(triple));
+                    }
+                    j += 1;
+                }
+            } else {
+                i += 1
+            }
+        }
+    }
+
+    pub fn fuse_communication(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>) {
+        let mut i = 0;
+        while i < triples.len() {
+            let input_tensor_ids = get_rtensor_ids_from_conditions(&triples[i].pre_conditions);
+            let output_tensor_ids = get_rtensor_ids_from_conditions(&triples[i].post_conditions);
+
+            if input_tensor_ids.len() == 1 && output_tensor_ids.len() == 1 && input_tensor_ids[0] == output_tensor_ids[0] { // communication
+                let comm_triple = triples.remove(i);
+                let output_property = *comm_triple.post_conditions.iter().find(|x| matches!(x, Property::HasTensor(_, _))).unwrap();
+
+                let mut j = 0;
+                while j < triples.len() {
+                    let triple = &triples[j];
+                    if triple.pre_conditions.contains(&output_property) && comm_triple.negative_post_conditions.iter().all(|x| !triple.pre_conditions.contains(x)) {
+                        triples.push(comm_triple.fuse_into(triple));
+                    }
+                    j += 1;
+                }
+            } else {
+                i += 1
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1447,6 +1442,7 @@ impl ClusterInfo {
     }
 }
 
+// idea: if calculating it is time consuming, make a struct called sharding plan wraps the sharding ratios and caches the sharding_round results for each length
 fn sharding_round(full_length: usize, sharding_ratios: &[f64]) -> Vec<usize> {
     let mut sharding_lengths: Vec<_> = sharding_ratios.iter().map(|x| (x * full_length as f64) as usize).collect();
     assert!(sharding_lengths.iter().sum::<usize>() <= full_length);
