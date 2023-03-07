@@ -30,12 +30,11 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
     #[allow(clippy::manual_strip)]
     m.add(py, "main", cpython::py_fn!(py, main(py_graph_module: PyObject, py_config: PyDict) -> PyResult<PyList> {
         let py_input_shape_dict = py_config.get_item(py, "input_shape").unwrap();
-        let (rgraph, module_info) = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
+        let rgraph = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
 
         // eprintln!("graph: {rgraph:#?}");
-        // eprintln!("module_info: {module_info:#?}");
 
-        let mut triples = analyze_rgraph(&rgraph, &module_info);
+        let mut triples = analyze_rgraph(&rgraph);
         let mut default_properties = vec![];
 
         // heuristics::compute_only_once(&mut triples, &mut default_properties, &rgraph);
@@ -58,7 +57,6 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
 
         let profiler = Profiler {
             rgraph: &rgraph,
-            module_info: &module_info,
             cluster_info: &cluster_info
         };
 
@@ -120,18 +118,13 @@ new_usize_type!(pub, RTensorId);
 new_usize_type!(pub, DNodeId);
 new_usize_type!(pub, DTensorId);
 
-new_usize_type!(pub, OpId);
-new_usize_type!(pub, ParameterId);
-new_usize_type!(pub, PlaceholderId);
-
-#[derive(Clone)]
 pub struct HoareTriple {
     pre_conditions: SVec<Property, 4>,
     post_conditions: SVec<Property>,
     negative_post_conditions: Vec<Property>,
     instruction: String, // for debugging purpose
-    codegen: Rc<dyn Fn(&mut CodegenContext) -> PyResult<()>>,
-    profile: Rc<dyn Fn(&mut ProfileContext) -> (Profile, Profile)>
+    codegen: Box<dyn Fn(&mut CodegenContext) -> PyResult<()>>,
+    profile: Box<dyn Fn(&mut ProfileContext) -> (Profile, Profile)>
 }
 
 impl Display for HoareTriple {
@@ -167,9 +160,9 @@ pub enum Property {
     Finished,
 
     AllowCommunication(RTensorId),
-    AllowPlaceholder(PlaceholderId),
-    AllowGetAttr(ParameterId),
-    AllowComputation(OpId), // or RNodeId?
+    // AllowPlaceholder(PlaceholderId),
+    // AllowGetAttr(ParameterId),
+    // AllowComputation(OpId), // or RNodeId?
 }
 
 impl Display for Property {
@@ -182,15 +175,15 @@ impl Display for Property {
             Property::AllowCommunication(tensor_id) => {
                 write!(f, "{}|allow_communication", tensor_id)
             }
-            Property::AllowPlaceholder(placeholder_id) => {
-                write!(f, "{}|allow_placeholder", placeholder_id)
-            }
-            Property::AllowGetAttr(parameter_id) => {
-                write!(f, "{}|allow_get_attr", parameter_id)
-            }
-            Property::AllowComputation(op_id) => {
-                write!(f, "{}|allow_computation", op_id)
-            }
+            // Property::AllowPlaceholder(placeholder_id) => {
+            //     write!(f, "{}|allow_placeholder", placeholder_id)
+            // }
+            // Property::AllowGetAttr(parameter_id) => {
+            //     write!(f, "{}|allow_get_attr", parameter_id)
+            // }
+            // Property::AllowComputation(op_id) => {
+            //     write!(f, "{}|allow_computation", op_id)
+            // }
         }
     }
 }
@@ -260,13 +253,12 @@ impl HoareTriple {
 }
 
 #[derive(Debug, Clone)]
-struct Profiler<'r, 'm, 'c> {
+struct Profiler<'r, 'c> {
     rgraph: &'r RGraph,
-    module_info: &'m ModuleInfo,
     cluster_info: &'c ClusterInfo,
 }
 
-impl<'r, 'm, 'c> Profiler<'r, 'm, 'c> {
+impl<'r, 'c> Profiler<'r, 'c> {
     fn get_time(&self, profile: &Profile, sharding_ratios: &[f64]) -> f64 {
         let computation_time = self.cluster_info.device_flops.iter().zip(sharding_ratios)
             .map(|(device_flops, ratio)| profile.flops * ratio / device_flops)
@@ -294,12 +286,12 @@ struct Profile {
 }
 
 
-struct ProfileContext<'p, 's, 'r, 'm, 'c> {
-    profiler: &'p Profiler<'r, 'm, 'c>,
+struct ProfileContext<'p, 's, 'r, 'c> {
+    profiler: &'p Profiler<'r, 'c>,
     sharding_ratios: &'s [f64],
 }
 
-impl<'p, 's, 'r, 'm, 'c> ProfileContext<'p, 's, 'r, 'm, 'c> {
+impl<'p, 's, 'r, 'c> ProfileContext<'p, 's, 'r, 'c> {
     fn get_shape_by_property(&self, property: Property) -> Shape {
         if let Property::HasTensor(tensor_id, rel) = property {
             let raw_shape = &self.profiler.rgraph[tensor_id].shape;
@@ -566,37 +558,6 @@ pub struct RGraph {
     tensors: Vec<RTensor>,
 }
 
-#[derive(Debug, Default)]
-struct ModuleInfo {
-    placeholders: Vec<String>,
-    parameters: Vec<String>,
-    ops: Vec<Op>
-}
-
-impl Index<OpId> for ModuleInfo {
-    type Output = Op;
-
-    fn index(&self, index: OpId) -> &Self::Output {
-        &self.ops[index.0]
-    }
-}
-
-impl Index<PlaceholderId> for ModuleInfo {
-    type Output = String;
-
-    fn index(&self, index: PlaceholderId) -> &Self::Output {
-        &self.placeholders[index.0]
-    }
-}
-
-impl Index<ParameterId> for ModuleInfo {
-    type Output = String;
-
-    fn index(&self, index: ParameterId) -> &Self::Output {
-        &self.parameters[index.0]
-    }
-}
-
 #[derive(Debug)]
 pub struct RNode {
     inputs: SVec<RTensorId, 4>,
@@ -605,11 +566,11 @@ pub struct RNode {
 }
 
 // An instruction in the reference graph without the input and output information
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum RInstruction {
-    Op(OpId),
-    GetAttr(ParameterId),
-    Placeholder(PlaceholderId),
+    Op(Rc<Op>),
+    GetAttr(String),
+    Placeholder(String),
     Output
 }
 
@@ -708,11 +669,10 @@ impl<'py> CodegenContext<'py> {
     }
 }
 
-#[derive(Clone)]
-struct Op {
+pub struct Op {
     py_name: String,
-    codegen: Rc<dyn Fn(Python, &PyObject, &[PyObject]) -> PyResult<SVec<PyObject, 1>>>,
-    flops: Rc<dyn Fn(&[Shape]) -> f64>,
+    codegen: Box<dyn Fn(Python, &PyObject, &[PyObject]) -> PyResult<SVec<PyObject, 1>>>,
+    flops: Box<dyn Fn(&[Shape]) -> f64>,
 }
 
 impl Debug for Op {
@@ -723,10 +683,9 @@ impl Debug for Op {
     }
 }
 
-struct ParserContext<'py, 'g, 'm, 'r> {
+struct ParserContext<'py, 'g, 'r> {
     py: Python<'py>,
     graph: &'g mut RGraph,
-    module_info: &'m mut ModuleInfo,
     results: &'r mut Vec<Option<EvalResult>>
 }
 
@@ -780,7 +739,25 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let node_id = RNodeId(ctx.graph.nodes.len());
         let tensor_id = RTensorId(ctx.graph.tensors.len());
-        let op_id = OpId(ctx.module_info.ops.len());
+
+        let op = Rc::new(Op {
+            py_name: "torch.nn.functional.linear".to_string(),
+            codegen: Box::new(|py, graph, inputs| {
+                if let [input, weight, bias] = inputs {
+                    let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.linear", None, None)?, (input, weight, bias)), None)?;
+                    Ok(smallvec![output])
+                } else {
+                    unreachable!()
+                }
+            }),
+            flops: Box::new(|shapes| {
+                if let [input_shape, weight_shape, bias_shape] = shapes {
+                    3. * input_shape.iter().product::<usize>() as f64 * weight_shape[0] as f64
+                } else {
+                    unreachable!()
+                }
+            })
+        });
 
         ctx.graph.tensors.push(RTensor {
             producer: node_id,
@@ -792,26 +769,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         ctx.graph.nodes.push(RNode {
             inputs: smallvec![input_input_tensor_id, input_weight_tensor_id, input_bias_tensor_id],
             outputs: smallvec![tensor_id],
-            instruction: RInstruction::Op(op_id)
-        });
-
-        ctx.module_info.ops.push(Op {
-            py_name: "torch.nn.functional.linear".to_string(),
-            codegen: Rc::new(|py, graph, inputs| {
-                if let [input, weight, bias] = inputs {
-                    let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.linear", None, None)?, (input, weight, bias)), None)?;
-                    Ok(smallvec![output])
-                } else {
-                    unreachable!()
-                }
-            }),
-            flops: Rc::new(|shapes| {
-                if let [input_shape, weight_shape, bias_shape] = shapes {
-                    3. * input_shape.iter().product::<usize>() as f64 * weight_shape[0] as f64
-                } else {
-                    unreachable!()
-                }
-            })
+            instruction: RInstruction::Op(op)
         });
 
         ctx.graph[input_input_tensor_id].consumers.push(node_id);
@@ -834,7 +792,19 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let node_id = RNodeId(ctx.graph.nodes.len());
         let tensor_id = RTensorId(ctx.graph.tensors.len());
-        let op_id = OpId(ctx.module_info.ops.len());
+
+        let op = Rc::new(Op {
+            py_name: "torch.sigmoid".to_string(),
+            codegen: Box::new(|py, graph, inputs| {
+                let input = &inputs[0];
+                let output = graph.call_method(py, "call_function", (py.eval("torch.sigmoid", None, None)?, (input, )), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                let input_shape = &shapes[0];
+                3. * input_shape.iter().product::<usize>() as f64
+            })
+        });
 
         ctx.graph.tensors.push(RTensor {
             producer: node_id,
@@ -846,20 +816,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         ctx.graph.nodes.push(RNode {
             inputs: smallvec![input_input_tensor_id],
             outputs: smallvec![tensor_id],
-            instruction: RInstruction::Op(op_id)
-        });
-
-        ctx.module_info.ops.push(Op {
-            py_name: "torch.sigmoid".to_string(),
-            codegen: Rc::new(|py, graph, inputs| {
-                let input = &inputs[0];
-                let output = graph.call_method(py, "call_function", (py.eval("torch.sigmoid", None, None)?, (input, )), None)?;
-                Ok(smallvec![output])
-            }),
-            flops: Rc::new(|shapes| {
-                let input_shape = &shapes[0];
-                3. * input_shape.iter().product::<usize>() as f64
-            })
+            instruction: RInstruction::Op(op)
         });
 
         ctx.graph[input_input_tensor_id].consumers.push(node_id);
@@ -882,7 +839,19 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let node_id = RNodeId(ctx.graph.nodes.len());
         let tensor_id = RTensorId(ctx.graph.tensors.len());
-        let op_id = OpId(ctx.module_info.ops.len());
+
+        let op = Rc::new(Op {
+            py_name: "torch.sum".to_string(),
+            codegen: Box::new(|py, graph, inputs| {
+                let input = &inputs[0];
+                let output = graph.call_method(py, "call_function", (py.eval("torch.sum", None, None)?, (input, )), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|input_shapes| {
+                let input_shape = &input_shapes[0];
+                input_shape.iter().product::<usize>() as f64
+            })
+        });
 
         ctx.graph.tensors.push(RTensor {
             producer: node_id,
@@ -894,20 +863,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         ctx.graph.nodes.push(RNode {
             inputs: smallvec![input_input_tensor_id],
             outputs: smallvec![tensor_id],
-            instruction: RInstruction::Op(op_id)
-        });
-
-        ctx.module_info.ops.push(Op {
-            py_name: "torch.sum".to_string(),
-            codegen: Rc::new(|py, graph, inputs| {
-                let input = &inputs[0];
-                let output = graph.call_method(py, "call_function", (py.eval("torch.sum", None, None)?, (input, )), None)?;
-                Ok(smallvec![output])
-            }),
-            flops: Rc::new(|input_shapes| {
-                let input_shape = &input_shapes[0];
-                input_shape.iter().product::<usize>() as f64
-            })
+            instruction: RInstruction::Op(op)
         });
 
         ctx.graph[input_input_tensor_id].consumers.push(node_id);
@@ -928,9 +884,8 @@ macro_rules! py_dict {
     }}
 }
 
-fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyObject) -> PyResult<(RGraph, ModuleInfo)> {
+fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyObject) -> PyResult<RGraph> {
     let mut graph = RGraph::default();
-    let mut module_info = ModuleInfo::default();
 
     let parsing_handlers = initialize_parsing_handlers(py)?;
 
@@ -949,11 +904,8 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
 
         match &op_str[..] {
             "placeholder" => {
-                let placeholder_id = PlaceholderId(module_info.placeholders.len());
                 let name: String = py_node.getattr(py, "target")?.extract(py)?;
                 let shape: Vec<usize> = py_input_shape_dict.get_item(py, &name)?.extract(py)?;
-
-                module_info.placeholders.push(name);
 
                 let node_id = RNodeId(graph.nodes.len());
                 let tensor_id = RTensorId(graph.tensors.len());
@@ -961,7 +913,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                 graph.nodes.push(RNode {
                     inputs: smallvec![],
                     outputs: smallvec![tensor_id],
-                    instruction: RInstruction::Placeholder(placeholder_id),
+                    instruction: RInstruction::Placeholder(name.clone()),
                 });
 
                 graph.tensors.push(RTensor {
@@ -975,9 +927,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
             },
 
             "get_attr" => {
-                let parameter_id = ParameterId(module_info.parameters.len());
                 let name: String = py_node.getattr(py, "target")?.extract(py)?;
-                module_info.parameters.push(name);
 
                 let shape: Vec<usize> = py.eval(
                     "get_shape_of_param_or_buffer(graph_module, node)",
@@ -990,7 +940,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                 graph.nodes.push(RNode {
                     inputs: smallvec![],
                     outputs: smallvec![tensor_id],
-                    instruction: RInstruction::GetAttr(parameter_id),
+                    instruction: RInstruction::GetAttr(name),
                 });
 
                 graph.tensors.push(RTensor {
@@ -1007,7 +957,6 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                 let ctx = ParserContext {
                     py,
                     graph: &mut graph,
-                    module_info: &mut module_info,
                     results: &mut results
                 };
 
@@ -1018,7 +967,6 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                 let ctx = ParserContext {
                     py,
                     graph: &mut graph,
-                    module_info: &mut module_info,
                     results: &mut results
                 };
 
@@ -1026,7 +974,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
             }
 
             "output" => {
-                if graph.nodes.iter().any(|node| node.instruction == RInstruction::Output) {
+                if graph.nodes.iter().any(|node| matches!(node.instruction, RInstruction::Output)) {
                     panic!("Multiple outputs in the graph");
                 }
 
@@ -1053,10 +1001,10 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
         }
     }
 
-    Ok((graph, module_info))
+    Ok(graph)
 }
 
-fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple> {
+fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
     let mut triples = vec![];
 
     let mut add_triple = |pre_conditions, post_conditions, instruction, codegen, profile| {
@@ -1074,17 +1022,15 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
     for (node_id, node) in rgraph.nodes.iter().enumerate() {
         let node_id = RNodeId(node_id);
 
-        match node.instruction {
-            RInstruction::Placeholder(placeholder_id) => {
+        match &node.instruction {
+            RInstruction::Placeholder(placeholder_name) => {
                 let tensor_id = node.outputs[0];
-
-                let placeholder_name = &module_info.placeholders[placeholder_id.0];
 
                 add_triple(
                     smallvec![],
                     smallvec![Property::identity(tensor_id)],
                     format!("placeholder_unsharded(\"{placeholder_name}\")"),
-                    Rc::new({
+                    Box::new({
                         let placeholder_name = placeholder_name.clone();
                         move |ctx| {
                             let py_result = ctx.fx_placeholder(&placeholder_name)?;
@@ -1092,7 +1038,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                             Ok(())
                         }
                     }),
-                    Rc::new(|ctx| Default::default())
+                    Box::new(|ctx| Default::default())
                 );
 
                 for (dim, &length) in rgraph[tensor_id].shape.iter().enumerate() {
@@ -1102,7 +1048,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                         smallvec![],
                         smallvec![Property::gather(tensor_id, dim)],
                         format!("placeholder_shard(\"{placeholder_name}\", dim={dim}])"),
-                        Rc::new({
+                        Box::new({
                             let placeholder_name = placeholder_name.clone();
                             move |ctx| {
                                 let py_complete_placeholder = ctx.fx_placeholder(&placeholder_name)?;
@@ -1113,21 +1059,19 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                                 Ok(())
                             }
                         }),
-                        Rc::new(|ctx| { Default::default() })
+                        Box::new(|ctx| { Default::default() })
                     );
                 }
             }
 
-            RInstruction::GetAttr(parameter_id) => {
+            RInstruction::GetAttr(parameter_name) => {
                 let tensor_id = node.outputs[0];
-
-                let parameter_name = &module_info.parameters[parameter_id.0];
 
                 add_triple(
                     smallvec![],
                     smallvec![Property::identity(tensor_id)],
                     format!("get_attr_unsharded(\"{parameter_name}\")"),
-                    Rc::new({
+                    Box::new({
                         let parameter_name = parameter_name.clone();
                         move |ctx| {
                             let py_result = ctx.fx_get_attr(&parameter_name)?;
@@ -1135,7 +1079,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                             Ok(())
                         }
                     }),
-                    Rc::new({
+                    Box::new({
                         let parameter_name = parameter_name.clone();
                         move |ctx| {
                             let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
@@ -1153,10 +1097,10 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                         smallvec![],
                         smallvec![Property::gather(tensor_id, dim)],
                         format!("get_attr_shard(\"{parameter_name}\", dim={dim}])"),
-                        Rc::new(|ctx| {
+                        Box::new(|ctx| {
                             todo!() // we need to actually shard the model here
                         }),
-                        Rc::new(|ctx| { Default::default() })
+                        Box::new(|ctx| { Default::default() })
                     );
                 }
             }
@@ -1168,12 +1112,12 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                     smallvec![Property::reduce(tensor_id)],
                     smallvec![Property::Finished],
                     format!("output"),
-                    Rc::new(move |ctx| {
+                    Box::new(move |ctx| {
                         let py_input = ctx.get_property_implementation(Property::reduce(tensor_id));
                         ctx.fx_output(py_input)?;
                         Ok(())
                     }),
-                    Rc::new(|ctx| { Default::default() })
+                    Box::new(|ctx| { Default::default() })
                 );
             }
 
@@ -1194,8 +1138,8 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                 smallvec![Property::gather(tensor_id, dim)],
                 smallvec![Property::identity(tensor_id)],
                 format!("all_gather(dim={dim})"),
-                Rc::new(move |ctx| { todo!() }),
-                Rc::new(move |ctx| {
+                Box::new(move |ctx| { todo!() }),
+                Box::new(move |ctx| {
                     let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                     let forward_profile = Profile { all_gather: size as f64, ..Default::default() };
                     let backward_profile = Profile { reduce_scatter: size as f64, ..Default::default() };
@@ -1207,16 +1151,16 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                 smallvec![Property::identity(tensor_id)],
                 smallvec![Property::gather(tensor_id, dim)],
                 format!("dynamic_slice(dim={dim})"),
-                Rc::new(move |ctx| { todo!() }),
-                Rc::new(move |ctx| { Default::default() })
+                Box::new(move |ctx| { todo!() }),
+                Box::new(move |ctx| { Default::default() })
             );
 
             add_triple(
                 smallvec![Property::reduce(tensor_id)],
                 smallvec![Property::gather(tensor_id, dim)],
                 format!("reduce_scatter(dim={dim})"),
-                Rc::new(move |ctx| { todo!() }),
-                Rc::new(move |ctx| {
+                Box::new(move |ctx| { todo!() }),
+                Box::new(move |ctx| {
                     let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                     let forward_profile = Profile { reduce_scatter: size as f64, ..Default::default() };
                     let backward_profile = Profile { all_gather: size as f64, ..Default::default() };
@@ -1229,8 +1173,8 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
             smallvec![Property::reduce(tensor_id)],
             smallvec![Property::identity(tensor_id)],
             format!("all_reduce"),
-            Rc::new(move |ctx| { todo!() }),
-            Rc::new(move |ctx| {
+            Box::new(move |ctx| { todo!() }),
+            Box::new(move |ctx| {
                 let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                 let forward_profile = Profile { all_reduce: size as f64, ..Default::default() };
                 let backward_profile = Profile { all_reduce: size as f64, ..Default::default() };
@@ -1245,8 +1189,8 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                         smallvec![Property::gather(tensor_id, i)],
                         smallvec![Property::gather(tensor_id, j)],
                         format!("all_to_all(cat={i}, split={j})"),
-                        Rc::new(move |ctx| { todo!() }),
-                        Rc::new(move |ctx| {
+                        Box::new(move |ctx| { todo!() }),
+                        Box::new(move |ctx| {
                             let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                             let forward_profile = Profile { all_to_all: size as f64, ..Default::default() };
                             let backward_profile = Profile { all_to_all: size as f64, ..Default::default() };
@@ -1259,39 +1203,36 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
     }
 
     macro_rules! for_each_op {
-        ($op_name: expr, |$node_id: ident, $node: ident, $op_id: ident| $body: block) => {{
+        ($op_name: expr, |$node_id: ident, $node: ident, $op: ident| $body: block) => {{
             for (node_id, $node) in rgraph.nodes.iter().enumerate() {
                 let $node_id = RNodeId(node_id);
-                if let RInstruction::Op($op_id) = $node.instruction && &module_info[$op_id].py_name == $op_name {
+                if let RInstruction::Op($op) = &$node.instruction && $op.py_name == $op_name {
                     $body
                 }
             }
         }}
     }
 
-    let mut add_comp_triple = |pre_conditions: SVec<Property, 4>, post_conditions: SVec<Property>, op_id: OpId| {
-        let op_codegen_fun = module_info[op_id].codegen.clone();
-        let op_flops_fun = module_info[op_id].flops.clone();
-
+    let mut add_comp_triple = |pre_conditions: SVec<Property, 4>, post_conditions: SVec<Property>, op: Rc<Op>| {
         add_triple(
             pre_conditions.clone(),
             post_conditions.clone(),
-            module_info[op_id].py_name.clone(),
-            Rc::new({
+            op.py_name.clone(),
+            Box::new({
+                let op = op.clone();
                 let pre_conditions = pre_conditions.clone();
-                let post_conditions = post_conditions.clone();
                 move |ctx| {
                     let inputs: Vec<_> = pre_conditions.iter().map(|p| ctx.get_property_implementation(*p)).collect();
-                    let outputs = op_codegen_fun(ctx.py, &ctx.graph, &inputs)?;
+                    let outputs = (op.codegen)(ctx.py, &ctx.graph, &inputs)?;
                     for (output_property, py_output) in post_conditions.iter().zip(outputs) {
                         ctx.set_property_implementation(*output_property, py_output);
                     }
                     Ok(())
                 }
             }),
-            Rc::new(move |ctx| {
+            Box::new(move |ctx| {
                 let shapes: Vec<_> = pre_conditions.iter().map(|p| ctx.get_shape_by_property(*p)).collect();
-                let flops = op_flops_fun(&shapes);
+                let flops = (op.flops)(&shapes);
                 let forward_profile = Profile { flops, ..Default::default() };
                 let backward_profile = Profile { flops: 2. * flops, ..Default::default() };
                 (forward_profile, backward_profile)
@@ -1300,11 +1241,11 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
     };
 
     // Linear
-    for_each_op!("torch.nn.functional.linear", |node_id, node, op_id| {
+    for_each_op!("torch.nn.functional.linear", |node_id, node, op| {
         add_comp_triple(
             node.inputs.iter().cloned().map(Property::identity).collect(),
             node.outputs.iter().cloned().map(Property::identity).collect(),
-            op_id,
+            op.clone(),
         );
 
         // data parallelism
@@ -1316,7 +1257,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                     Property::identity(node.inputs[2]),
                 ],
                 smallvec![Property::gather(node.outputs[0], dim)],
-                op_id,
+                op.clone(),
             );
         }
 
@@ -1328,7 +1269,7 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
                 Property::gather(node.inputs[2], 0),
             ],
             smallvec![Property::gather(node.outputs[0], rgraph[node.outputs[0]].n_dims() - 1)],
-            op_id,
+            op.clone(),
         );
 
         // reduction?
@@ -1337,42 +1278,42 @@ fn analyze_rgraph(rgraph: &RGraph, module_info: &ModuleInfo) -> Vec<HoareTriple>
     });
 
     // Sigmoid
-    for_each_op!("torch.sigmoid", |node_id, node, op_id| {
+    for_each_op!("torch.sigmoid", |node_id, node, op| {
         add_comp_triple(
             node.inputs.iter().cloned().map(Property::identity).collect(),
             node.outputs.iter().cloned().map(Property::identity).collect(),
-            op_id,
+            op.clone(),
         );
 
         for dim in 0..rgraph[node.inputs[0]].n_dims() {
             add_comp_triple(
                 smallvec![Property::gather(node.inputs[0], dim)],
                 smallvec![Property::gather(node.outputs[0], dim)],
-                op_id,
+                op.clone(),
             );
         }
     });
 
     // Sum
-    for_each_op!("torch.sum", |node_id, node, op_id| {
+    for_each_op!("torch.sum", |node_id, node, op| {
         add_comp_triple(
             node.inputs.iter().cloned().map(Property::identity).collect(),
             node.outputs.iter().cloned().map(Property::identity).collect(),
-            op_id,
+            op.clone(),
         );
 
         for dim in 0..rgraph[node.inputs[0]].n_dims() {
             add_comp_triple(
                 smallvec![Property::gather(node.inputs[0], dim)],
                 smallvec![Property::reduce(node.outputs[0])],
-                op_id,
+                op.clone(),
             );
         }
 
         add_comp_triple(
             smallvec![Property::reduce(node.inputs[0])],
             smallvec![Property::reduce(node.outputs[0])],
-            op_id,
+            op.clone(),
         );
     });
 
