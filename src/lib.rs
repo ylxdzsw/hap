@@ -39,7 +39,7 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
 
         heuristics::unique_computation(&mut triples, &mut default_properties);
         heuristics::unique_communication(&mut triples, &mut default_properties);
-        // heuristics::fuse_free_triple(&mut triples, &mut default_properties);
+        heuristics::fuse_free_triple(&mut triples, &mut default_properties);
         heuristics::fuse_communication(&mut triples, &mut default_properties);
 
         // for triple in triples.iter() {
@@ -202,6 +202,7 @@ pub enum TensorRelation {
 
 impl HoareTriple {
     fn get_cost(&self, profiler: &Profiler, sharding_ratios: &[f64]) -> f64 {
+        // idea: may cache the cost of each triple while using the same sharding ratios
         let (computation_times, communication_times): (Vec<_>, Vec<_>) = (0..sharding_ratios.len()).map(|i| {
             // TODO: a lot of unnecessary work. Need benchmark.
             let mut profile_context = ProfileContext {
@@ -224,6 +225,8 @@ impl HoareTriple {
     }
 
     fn fuse_into(&self, consumer: &HoareTriple) -> HoareTriple {
+        // note: must avoid circles. Currently I only fuse free tensors and communications, which are safe
+
         for negative_post_condition in self.negative_post_conditions.iter() {
             assert!(!consumer.pre_conditions.contains(&negative_post_condition));
         }
@@ -1089,6 +1092,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         move |ctx| {
                             let py_result = ctx.fx_get_attr(&parameter_name)?;
                             ctx.set_property_implementation(Property::identity(tensor_id), py_result);
+                            todo!(); // all reduce in backward
                             Ok(())
                         }
                     }),
