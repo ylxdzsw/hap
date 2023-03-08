@@ -19,7 +19,7 @@ dgraph = hetspmd.main(model, {
     "input_shape": config.input_shape()
 })
 
-print(dgraph, flush=True)
+# print(dgraph, flush=True)
 
 dmodel = torch.fx.GraphModule(model, dgraph)
 

@@ -11,7 +11,7 @@ model_name = "Tmlp"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
 
-world_size = 8
+world_size = 4
 nlayers = 3
 n_expert = 2 * world_size
 batch_size = 32 * world_size
@@ -45,9 +45,9 @@ profile_noise = 0
 
 lr = 5e-4
 
-run_iter = 50
+run_iter = 100
 avg_iter = 20
-log_iter = 10
+log_iter = 20
 
 # fp16 = True
 fp16 = False
