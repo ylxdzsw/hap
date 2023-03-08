@@ -27,7 +27,7 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         }).unwrap();
     }
 
-    m.add(py, "main", cpython::py_fn!(py, main(py_graph_module: PyObject, py_config: PyDict) -> PyResult<PyList> {
+    m.add(py, "main", cpython::py_fn!(py, main(py_graph_module: PyObject, py_config: PyDict) -> PyResult<PyObject> {
         let py_input_shape_dict = py_config.get_item(py, "input_shape").unwrap();
         let rgraph = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
 
@@ -64,7 +64,13 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         eprintln!("===== Result =====\n\n");
         best_program.show(&triple_set);
 
-        Ok(PyList::new(py, &[]))
+        let mut codegen_context = CodegenContext::new(
+            py, py.eval("torch.fx.Graph()", None, None)?, &rgraph, 0, vec![0.1, 0.2, 0.3, 0.4]
+        );
+
+        best_program.codegen(&triple_set, &mut codegen_context)?;
+
+        Ok(codegen_context.graph)
     }))?;
 
     Ok(())
@@ -352,7 +358,7 @@ impl Program {
 
         remove_irrelavent_properties(&mut properties, &triple_set);
 
-        let cost = self.cost + triple.get_cost(profiler, &[0.25; 4]);
+        let cost = self.cost + triple.get_cost(profiler, &[0.1, 0.2, 0.3, 0.4]);
         let ecost = 0.0;
 
         Program { triple_ids: triples, properties, cost, ecost }
@@ -382,6 +388,19 @@ impl Program {
         for triple_id in &self.triple_ids {
             eprintln!("{}", triple_set[*triple_id]);
         }
+    }
+
+    fn codegen<'py, 'r>(&self, triple_set: &IndexedHoareTripleSet, ctx: &mut CodegenContext<'py, 'r>) -> PyResult<()> {
+        for triple_id in &self.triple_ids {
+            let triple = &triple_set[*triple_id];
+            (triple.codegen)(ctx)?;
+            for property in &triple.post_conditions {
+                if let Property::HasTensor(tensor_id, _) = property {
+                    assert!(ctx.property_implementation.contains_key(property), "{} {}", triple, property);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -636,20 +655,21 @@ impl IndexMut<RTensorId> for RGraph {
     }
 }
 
-struct CodegenContext<'py> {
+struct CodegenContext<'py, 'r> {
     py: Python<'py>,
     graph: PyObject,
+    rgraph: &'r RGraph, // only to provide shape information
 
-    device_index: usize,
+    rank: usize,
     sharding_ratios: Vec<f64>,
 
     property_implementation: BTreeMap<Property, PyObject>
 }
 
-impl<'py> CodegenContext<'py> {
-    fn new(py: Python<'py>, graph: PyObject, device_index: usize, sharding_ratios: Vec<f64>) -> Self {
+impl<'py, 'r> CodegenContext<'py, 'r> {
+    fn new(py: Python<'py>, graph: PyObject, rgraph: &'r RGraph, rank: usize, sharding_ratios: Vec<f64>) -> Self {
         Self {
-            py, graph, device_index, sharding_ratios,
+            py, graph, rgraph, rank, sharding_ratios,
             property_implementation: BTreeMap::new()
         }
     }
@@ -681,6 +701,23 @@ impl<'py> CodegenContext<'py> {
 
     fn fx_output(&mut self, output: PyObject) -> PyResult<PyObject> {
         self.graph.call_method(self.py, "output", (output, ), None)
+    }
+
+    fn get_shape_by_property(&self, property: Property) -> Shape {
+        if let Property::HasTensor(tensor_id, rel) = property {
+            let raw_shape = &self.rgraph[tensor_id].shape;
+            match rel {
+                TensorRelation::Identity | TensorRelation::Reduce => raw_shape.clone(),
+                TensorRelation::Gather(dim) => {
+                    let dim = dim as usize;
+                    let mut shape = raw_shape.clone();
+                    shape[dim] = sharding_round(shape[dim], &self.sharding_ratios)[self.rank];
+                    shape
+                }
+            }
+        } else {
+            unreachable!()
+        }
     }
 }
 
@@ -1069,7 +1106,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                                 let py_complete_placeholder = ctx.fx_placeholder(&placeholder_name)?;
                                 let chunk_lengths = sharding_round(length, &ctx.sharding_ratios);
                                 let py_chunks = ctx.fx_call_method("split", (py_complete_placeholder, chunk_lengths, dim), None)?;
-                                let py_chunk = ctx.fx_call_function("operator.getitem", (py_chunks, ctx.device_index), None)?;
+                                let py_chunk = ctx.fx_call_function("operator.getitem", (py_chunks, ctx.rank), None)?;
                                 ctx.set_property_implementation(Property::gather(tensor_id, dim), py_chunk);
                                 Ok(())
                             }
@@ -1117,7 +1154,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                             let parameter_name = parameter_name.clone();
                             move |ctx| {
                                 let py_parameter = ctx.fx_get_attr(&parameter_name)?;
-                                ctx.set_property_implementation(Property::identity(tensor_id), py_parameter);
+                                ctx.set_property_implementation(Property::gather(tensor_id, dim), py_parameter);
                                 // TODO: we need to actually copy and shard the tensor here
                                 Ok(())
                             }
@@ -1160,7 +1197,12 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 smallvec![Property::gather(tensor_id, dim)],
                 smallvec![Property::identity(tensor_id)],
                 format!("all_gather(dim={dim})"),
-                Rc::new(move |ctx| { todo!() }),
+                Rc::new(move |ctx| {
+                    let py_input = ctx.get_property_implementation(Property::gather(tensor_id, dim));
+                    let py_result = ctx.fx_call_function("collectives.all_gather", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios), ctx.rank), None)?;
+                    ctx.set_property_implementation(Property::identity(tensor_id), py_result);
+                    Ok(())
+                }),
                 Rc::new(move |ctx| {
                     let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                     let forward_profile = Profile { all_gather: size as f64, ..Default::default() };
@@ -1173,7 +1215,12 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 smallvec![Property::identity(tensor_id)],
                 smallvec![Property::gather(tensor_id, dim)],
                 format!("dynamic_slice(dim={dim})"),
-                Rc::new(move |ctx| { todo!() }),
+                Rc::new(move |ctx| {
+                    let py_input = ctx.get_property_implementation(Property::identity(tensor_id));
+                    let py_result = ctx.fx_call_function("collectives.dynamic_slice", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios), ctx.rank), None)?;
+                    ctx.set_property_implementation(Property::gather(tensor_id, dim), py_result);
+                    Ok(())
+                }),
                 Rc::new(move |ctx| { Default::default() })
             );
 
@@ -1181,7 +1228,12 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 smallvec![Property::reduce(tensor_id)],
                 smallvec![Property::gather(tensor_id, dim)],
                 format!("reduce_scatter(dim={dim})"),
-                Rc::new(move |ctx| { todo!() }),
+                Rc::new(move |ctx| {
+                    let py_input = ctx.get_property_implementation(Property::reduce(tensor_id));
+                    let py_result = ctx.fx_call_function("collectives.reduce_scatter", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios), ctx.rank), None)?;
+                    ctx.set_property_implementation(Property::gather(tensor_id, dim), py_result);
+                    Ok(())
+                }),
                 Rc::new(move |ctx| {
                     let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                     let forward_profile = Profile { reduce_scatter: size as f64, ..Default::default() };
@@ -1195,7 +1247,12 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
             smallvec![Property::reduce(tensor_id)],
             smallvec![Property::identity(tensor_id)],
             format!("all_reduce"),
-            Rc::new(move |ctx| { todo!() }),
+            Rc::new(move |ctx| {
+                let py_input = ctx.get_property_implementation(Property::reduce(tensor_id));
+                let py_result = ctx.fx_call_function("collectives.all_reduce", (py_input,), None)?;
+                ctx.set_property_implementation(Property::identity(tensor_id), py_result);
+                Ok(())
+            }),
             Rc::new(move |ctx| {
                 let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                 let forward_profile = Profile { all_reduce: size as f64, ..Default::default() };
@@ -1211,7 +1268,19 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         smallvec![Property::gather(tensor_id, i)],
                         smallvec![Property::gather(tensor_id, j)],
                         format!("all_to_all(cat={i}, split={j})"),
-                        Rc::new(move |ctx| { todo!() }),
+                        Rc::new(move |ctx| {
+                            let py_input = ctx.get_property_implementation(Property::gather(tensor_id, i));
+                            let py_result = ctx.fx_call_function("collectives.all_to_all", (
+                                py_input,
+                                j,
+                                i,
+                                sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[j as usize], &ctx.sharding_ratios),
+                                sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[i as usize], &ctx.sharding_ratios),
+                                ctx.rank
+                            ), None)?;
+                            ctx.set_property_implementation(Property::gather(tensor_id, j), py_result);
+                            Ok(())
+                        }),
                         Rc::new(move |ctx| {
                             let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                             let forward_profile = Profile { all_to_all: size as f64, ..Default::default() };
@@ -1246,7 +1315,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 move |ctx| {
                     let inputs: Vec<_> = pre_conditions.iter().map(|p| ctx.get_property_implementation(*p)).collect();
                     let outputs = (op.codegen)(ctx.py, &ctx.graph, &inputs)?;
-                    for (output_property, py_output) in post_conditions.iter().zip(outputs) {
+                    for (output_property, py_output) in post_conditions.iter().filter(|p| matches!(p, Property::HasTensor(_, _))).zip(outputs) {
                         ctx.set_property_implementation(*output_property, py_output);
                     }
                     Ok(())
