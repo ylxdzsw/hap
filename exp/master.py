@@ -6,6 +6,8 @@ import hetspmd
 
 from utils import *
 
+import collectives
+
 model = symbolic_trace(config.get_model(seed=39))
 print(model.code, flush=True)
 

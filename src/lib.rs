@@ -27,7 +27,6 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         }).unwrap();
     }
 
-    #[allow(clippy::manual_strip)]
     m.add(py, "main", cpython::py_fn!(py, main(py_graph_module: PyObject, py_config: PyDict) -> PyResult<PyList> {
         let py_input_shape_dict = py_config.get_item(py, "input_shape").unwrap();
         let rgraph = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
@@ -1090,9 +1089,9 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     Rc::new({
                         let parameter_name = parameter_name.clone();
                         move |ctx| {
-                            let py_result = ctx.fx_get_attr(&parameter_name)?;
-                            ctx.set_property_implementation(Property::identity(tensor_id), py_result);
-                            todo!(); // all reduce in backward
+                            let py_parameter = ctx.fx_get_attr(&parameter_name)?;
+                            let py_replicated = ctx.fx_call_function("collectives.replicate", (py_parameter,), None)?;
+                            ctx.set_property_implementation(Property::identity(tensor_id), py_replicated);
                             Ok(())
                         }
                     }),
@@ -1114,8 +1113,14 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         smallvec![],
                         smallvec![Property::gather(tensor_id, dim)],
                         format!("get_attr_shard(\"{parameter_name}\", dim={dim}])"),
-                        Rc::new(|ctx| {
-                            todo!() // we need to actually shard the model here
+                        Rc::new({
+                            let parameter_name = parameter_name.clone();
+                            move |ctx| {
+                                let py_parameter = ctx.fx_get_attr(&parameter_name)?;
+                                ctx.set_property_implementation(Property::identity(tensor_id), py_parameter);
+                                // TODO: we need to actually copy and shard the tensor here
+                                Ok(())
+                            }
                         }),
                         Rc::new(|ctx| { Default::default() })
                     );
