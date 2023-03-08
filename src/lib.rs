@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt::{Display, Debug, Formatter};
 use std::cmp::Ordering;
 use float_ord::FloatOrd;
-use cpython::{PyResult, PyTuple, ToPyObject, ObjectProtocol, Python, PyList, PyObject, PyDict, PyClone};
+use cpython::{PyResult, PyTuple, ToPyObject, ObjectProtocol, Python, PyObject, PyDict, PyClone};
 use smallvec::{SmallVec, smallvec};
 
 pub type SVec<T, const N: usize = 1> = SmallVec<[T; N]>;
@@ -395,7 +395,7 @@ impl Program {
             let triple = &triple_set[*triple_id];
             (triple.codegen)(ctx)?;
             for property in &triple.post_conditions {
-                if let Property::HasTensor(tensor_id, _) = property {
+                if let Property::HasTensor(_, _) = property {
                     assert!(ctx.property_implementation.contains_key(property), "{} {}", triple, property);
                 }
             }
@@ -406,7 +406,7 @@ impl Program {
 
 // not all irrelavent properties are removed: we only remove those can be checked without recursion to speeds up this function
 fn remove_irrelavent_properties(properties: &mut BTreeSet<Property>, triple_set: &IndexedHoareTripleSet) {
-    let mut irrelavent: Vec<_> = properties.iter().filter(|property| {
+    let irrelavent: Vec<_> = properties.iter().filter(|property| {
         if property == &&Property::Finished {
             return false;
         }
@@ -803,7 +803,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
                 }
             }),
             flops: Box::new(|shapes| {
-                if let [input_shape, weight_shape, bias_shape] = shapes {
+                if let [input_shape, weight_shape, _bias_shape] = shapes {
                     3. * input_shape.iter().product::<usize>() as f64 * weight_shape[0] as f64
                 } else {
                     unreachable!()
@@ -887,7 +887,6 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         let py_input_input_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 0)?;
         let py_input_input_id = py_input_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?;
         let input_input_tensor_id = ctx.results[py_input_input_id].as_ref().unwrap().as_tensor();
-        let input_input_tensor = &ctx.graph[input_input_tensor_id];
 
         let node_id = RNodeId(ctx.graph.nodes.len());
         let tensor_id = RTensorId(ctx.graph.tensors.len());
@@ -1071,9 +1070,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
     };
 
     // Placeholder, GetAttr, Output
-    for (node_id, node) in rgraph.nodes.iter().enumerate() {
-        let node_id = RNodeId(node_id);
-
+    for node in rgraph.nodes.iter() {
         match &node.instruction {
             RInstruction::Placeholder(placeholder_name) => {
                 let tensor_id = node.outputs[0];
@@ -1133,7 +1130,6 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         }
                     }),
                     Rc::new({
-                        let parameter_name = parameter_name.clone();
                         move |ctx| {
                             let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                             let forward_profile = Default::default();
@@ -1294,9 +1290,8 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
     }
 
     macro_rules! for_each_op {
-        ($op_name: expr, |$node_id: ident, $node: ident, $op: ident| $body: block) => {{
-            for (node_id, $node) in rgraph.nodes.iter().enumerate() {
-                let $node_id = RNodeId(node_id);
+        ($op_name: expr, |$node: ident, $op: ident| $body: block) => {{
+            for $node in rgraph.nodes.iter() {
                 if let RInstruction::Op($op) = &$node.instruction && $op.py_name == $op_name {
                     $body
                 }
@@ -1332,7 +1327,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
     };
 
     // Linear
-    for_each_op!("torch.nn.functional.linear", |node_id, node, op| {
+    for_each_op!("torch.nn.functional.linear", |node, op| {
         add_comp_triple(
             node.inputs.iter().cloned().map(Property::identity).collect(),
             node.outputs.iter().cloned().map(Property::identity).collect(),
@@ -1369,7 +1364,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
     });
 
     // Sigmoid
-    for_each_op!("torch.sigmoid", |node_id, node, op| {
+    for_each_op!("torch.sigmoid", |node, op| {
         add_comp_triple(
             node.inputs.iter().cloned().map(Property::identity).collect(),
             node.outputs.iter().cloned().map(Property::identity).collect(),
@@ -1386,7 +1381,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
     });
 
     // Sum
-    for_each_op!("torch.sum", |node_id, node, op| {
+    for_each_op!("torch.sum", |node, op| {
         add_comp_triple(
             node.inputs.iter().cloned().map(Property::identity).collect(),
             node.outputs.iter().cloned().map(Property::identity).collect(),
@@ -1416,12 +1411,10 @@ mod heuristics {
 
     fn get_rtensor_ids_from_conditions(conditions: &[Property]) -> Vec<RTensorId> {
         conditions.iter()
-            .flat_map(|p| if let Property::HasTensor(tensor_id, _) = *p {
-                Some(tensor_id)
-            } else {
-                None
-            })
-            .collect()
+            .flat_map(|p| match *p {
+                Property::HasTensor(tensor_id, _) => Some(tensor_id),
+                _ => None
+            }).collect()
     }
 
     /// only allow up to one communication per rtensor
@@ -1454,7 +1447,7 @@ mod heuristics {
     }
 
     /// fuse free triples into its consumers. Free triples are those have no tensor input (Placeholder and GetAttr)
-    pub fn fuse_free_triple(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>) {
+    pub fn fuse_free_triple(triples: &mut Vec<HoareTriple>, _default_properties: &mut Vec<Property>) {
         let mut i = 0;
         while i < triples.len() {
             let input_tensor_ids = get_rtensor_ids_from_conditions(&triples[i].pre_conditions);
@@ -1480,7 +1473,7 @@ mod heuristics {
         }
     }
 
-    pub fn fuse_communication(triples: &mut Vec<HoareTriple>, default_properties: &mut Vec<Property>) {
+    pub fn fuse_communication(triples: &mut Vec<HoareTriple>, _default_properties: &mut Vec<Property>) {
         let mut i = 0;
         while i < triples.len() {
             let input_tensor_ids = get_rtensor_ids_from_conditions(&triples[i].pre_conditions);

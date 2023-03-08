@@ -1,15 +1,7 @@
-# this is basically the same as torch.distributed.nn.functional, with the following differences:
-# 1. we add .contiguous() calls that is required by NCCL,
-# 2. we insert chunk/cat calls and unify the API, such that we can generate calls to them automatically,
-# 3. we ignore other backends than NCCL, remove the support for higher order derivatives, and fill-in default arguments like reduce op and collective group.
-# Note: NCCL operators are in-place, we must clone the input tensors. Some tensors in the backward pass may be modified in-place but better be defensive here.
-
 from __future__ import annotations
 
 import torch
 import torch.distributed as dist
-
-from utils import *
 
 def sharded_shape(shape, dim, length):
     return shape[:dim] + (length,) + shape[dim+1:]

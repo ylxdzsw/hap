@@ -12,7 +12,7 @@ model_name = "Tmlp"
 # model_name = "Vswitch"
 
 world_size = 4
-nlayers = 3
+nlayers = 4
 n_expert = 2 * world_size
 batch_size = 32 * world_size
 seqlen = 128
