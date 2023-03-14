@@ -76,11 +76,3 @@ def load(file: str) -> ...:
     import pickle
     with open(file, 'rb') as f:
         return pickle.load(f)
-
-# a helper function to use in Rust side
-def get_shape_of_param_or_buffer(graph_module, node):
-    try:
-        p = graph_module.get_parameter(node.target)
-    except AttributeError:
-        p = graph_module.get_buffer(node.target)
-    return tuple(p.shape)

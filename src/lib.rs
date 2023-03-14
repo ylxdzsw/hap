@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt::{Display, Debug, Formatter};
 use std::cmp::Ordering;
 use float_ord::FloatOrd;
-use cpython::{PyResult, PyTuple, ToPyObject, ObjectProtocol, Python, PyObject, PyDict, PyClone};
+use cpython::{PyResult, PyTuple, ToPyObject, ObjectProtocol, Python, PyObject, PyDict, PyClone, PyNone};
 use smallvec::{SmallVec, smallvec};
 
 pub type SVec<T, const N: usize = 1> = SmallVec<[T; N]>;
@@ -20,6 +20,27 @@ type Shape = SVec<usize, 4>;
 static CTRLC_TRAPPED: AtomicBool = AtomicBool::new(false);
 static CTRLC_RECEIVED: AtomicBool = AtomicBool::new(false);
 
+static init_script: &str = r#"
+import collectives
+import operator
+
+def get_shape_of_param_or_buffer(graph_module, node):
+    try:
+        p = graph_module.get_parameter(node.target)
+    except AttributeError:
+        p = graph_module.get_buffer(node.target)
+    return tuple(p.shape)
+
+def split_param_or_buffer(graph_module, target, sharding_lengths, dim, rank):
+    import torch
+
+    try:
+        p = graph_module.get_parameter(target)
+    except AttributeError:
+        p = graph_module.get_buffer(target)
+    p.data = torch.split(p.data, sharding_lengths, dim)[rank]
+"#;
+
 cpython::py_module_initializer!(hetspmd, |py, m| {
     if !CTRLC_TRAPPED.load(std::sync::atomic::Ordering::Relaxed) {
         ctrlc::set_handler(|| {
@@ -27,7 +48,15 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         }).unwrap();
     }
 
-    m.add(py, "main", cpython::py_fn!(py, main(py_graph_module: PyObject, py_config: PyDict) -> PyResult<PyObject> {
+    m.add(py, "init", cpython::py_fn!(py, init() -> PyResult<PyNone> {
+        py.run(init_script, None, None).map(|_| PyNone)
+    }))?;
+
+    m.add(py, "main", cpython::py_fn!(py, main(py_graph_module: PyObject, py_config: PyObject) -> PyResult<PyObject> {
+        macro_rules! get_config {
+            ($key: expr) => { py_config.get_item(py, $key)?.extract(py)? }
+        }
+
         let py_input_shape_dict = py_config.get_item(py, "input_shape").unwrap();
         let rgraph = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
 
@@ -46,11 +75,11 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         // }
 
         let cluster_info = ClusterInfo {
-            device_flops: vec![4139214925014.; 4],
-            all_reduce_bandwidth: 611692856.,
-            all_gather_bandwidth: 1224592728.,
-            reduce_scatter_bandwidth: 1130230706.,
-            all_to_all_bandwidth: 10701240728.
+            device_flops: get_config!("device_flops"),
+            all_reduce_bandwidth: get_config!("all_reduce_bandwidth"),
+            all_gather_bandwidth: get_config!("all_gather_bandwidth"),
+            reduce_scatter_bandwidth: get_config!("reduce_scatter_bandwidth"),
+            all_to_all_bandwidth: get_config!("all_to_all_bandwidth")
         };
 
         let profiler = Profiler {
@@ -65,8 +94,8 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         best_program.show(&triple_set);
 
         let mut codegen_context = CodegenContext::new(
-            py, py.eval("torch.fx.Graph()", None, None)?, &rgraph, 0, vec![0.1, 0.2, 0.3, 0.4]
-        );
+            py, py_graph_module, &rgraph, 0, vec![0.1, 0.2, 0.3, 0.4]
+        )?;
 
         best_program.codegen(&triple_set, &mut codegen_context)?;
 
@@ -658,6 +687,7 @@ impl IndexMut<RTensorId> for RGraph {
 struct CodegenContext<'py, 'r> {
     py: Python<'py>,
     graph: PyObject,
+    module: PyObject, // the graph_module to modify (the parameters will be sharded inplace)
     rgraph: &'r RGraph, // only to provide shape information
 
     rank: usize,
@@ -667,11 +697,13 @@ struct CodegenContext<'py, 'r> {
 }
 
 impl<'py, 'r> CodegenContext<'py, 'r> {
-    fn new(py: Python<'py>, graph: PyObject, rgraph: &'r RGraph, rank: usize, sharding_ratios: Vec<f64>) -> Self {
-        Self {
-            py, graph, rgraph, rank, sharding_ratios,
+    fn new(py: Python<'py>, module: PyObject, rgraph: &'r RGraph, rank: usize, sharding_ratios: Vec<f64>) -> PyResult<Self> {
+        let graph = py.eval("torch.fx.Graph()", None, None)?;
+
+        Ok(Self {
+            py, graph, module, rgraph, rank, sharding_ratios,
             property_implementation: BTreeMap::new()
-        }
+        })
     }
 
     fn get_property_implementation(&mut self, property: Property) -> PyObject {

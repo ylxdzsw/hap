@@ -12,9 +12,6 @@ import hetspmd
 
 from utils import *
 
-import collectives # required in codegen
-import operator # required in codegen
-
 def run(global_rank, local_rank):
     import torch.distributed as dist
     dist.init_process_group('nccl', rank=global_rank, timeout=datetime.timedelta(hours=2))
@@ -26,7 +23,12 @@ def run(global_rank, local_rank):
         node.meta['id'] = i
 
     dgraph = hetspmd.main(model, {
-        "input_shape": config.input_shape()
+        "input_shape": config.input_shape(),
+        "device_flops": [4139214925014.] * 4,
+        "all_reduce_bandwidth": 611692856.,
+        "all_gather_bandwidth": 1224592728.,
+        "reduce_scatter_bandwidth": 1130230706.,
+        "all_to_all_bandwidth": 10701240728.
     })
 
     # print(dgraph, flush=True)
