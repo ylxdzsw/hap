@@ -26,5 +26,3 @@ dgraph = hetspmd.main(model, {
 # print(dgraph, flush=True)
 
 dmodel = torch.fx.GraphModule(model, dgraph)
-
-print(dmodel.code, flush=True)

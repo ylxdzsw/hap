@@ -3,7 +3,7 @@ import sys
 import math
 
 rootpath = "/root/hidup"
-sys.path.insert(1, f"{rootpath}/spmd")
+# sys.path.insert(1, f"{rootpath}/spmd")
 
 model_name = "Tmlp"
 # model_name = "Rmoe"
@@ -12,7 +12,7 @@ model_name = "Tmlp"
 # model_name = "Vswitch"
 
 world_size = 4
-nlayers = 4
+nlayers = 2
 n_expert = 2 * world_size
 batch_size = 32 * world_size
 seqlen = 128
@@ -31,8 +31,8 @@ nheads = 12
 master_addr = "127.0.0.1"
 master_port = 39262
 
-trace = True
-# trace = False
+# trace = True
+trace = False
 
 # use_hints = True
 use_hints = False

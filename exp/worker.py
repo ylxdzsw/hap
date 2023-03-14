@@ -16,16 +16,18 @@ def run(global_rank, local_rank):
     import torch.distributed as dist
     dist.init_process_group('nccl', rank=global_rank, timeout=datetime.timedelta(hours=2))
 
-    model = symbolic_trace(config.get_model(seed=39).cuda(local_rank))
+    model = symbolic_trace(config.get_model(seed=39))
     print(model.code, flush=True)
 
     for i, node in enumerate(model.graph.nodes):
         node.meta['id'] = i
 
+    hetspmd.init()
+
     dgraph = hetspmd.main(model, {
         "input_shape": config.input_shape(),
         "device_flops": [4139214925014.] * 4,
-        "all_reduce_bandwidth": 611692856.,
+        "all_reduce_bandwidth": 6116928.,
         "all_gather_bandwidth": 1224592728.,
         "reduce_scatter_bandwidth": 1130230706.,
         "all_to_all_bandwidth": 10701240728.
@@ -33,9 +35,9 @@ def run(global_rank, local_rank):
 
     # print(dgraph, flush=True)
 
-    dmodel = torch.fx.GraphModule(model, dgraph)
+    dmodel = torch.fx.GraphModule(model, dgraph).cuda(local_rank)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+    optimizer = torch.optim.Adam(dmodel.parameters(), lr=config.lr)
     train_data = config.get_data()[1]
 
     result_times = []

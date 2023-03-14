@@ -6,24 +6,30 @@ import torch.distributed as dist
 def sharded_shape(shape, dim, length):
     return shape[:dim] + (length,) + shape[dim+1:]
 
+def padded(tensor, dim, length):
+    if tensor.shape[dim] == length:
+        return tensor
+    return torch.cat([ tensor, torch.empty(*sharded_shape(tensor.shape, dim, length - tensor.shape[dim]), device=tensor.device) ], dim=dim)
+
 class AllGather(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tensor, dim, sharding_lengths, rank):
         ctx.dim, ctx.sharding_lengths, ctx.rank = dim, sharding_lengths, rank
-        out_tensor_slices = [ torch.empty(*sharded_shape(tensor.shape, dim, length)) for length in sharding_lengths ]
-        dist.all_gather(out_tensor_slices, tensor)
-        return torch.cat(out_tensor_slices, dim=dim)
+        out_tensor_slices = [ torch.empty(*sharded_shape(tensor.shape, dim, max(sharding_lengths)), device=tensor.device) for _ in sharding_lengths ]
+        dist.all_gather(out_tensor_slices, padded(tensor, dim, max(sharding_lengths)).contiguous())
+        return torch.cat([ out_tensor_slice.split([sharding_length, max(sharding_lengths) - sharding_length], dim=dim)[0] for out_tensor_slice, sharding_length in zip(out_tensor_slices, sharding_lengths) ], dim=dim)
 
     @staticmethod
     def backward(ctx, grad_output):
-        # removing this `.contiguous()` call leads to silent wrong result!
         grad_output_slices = torch.split(grad_output.contiguous(), ctx.sharding_lengths, dim=ctx.dim)
-        grad = torch.empty_like(grad_output_slices[ctx.rank])
-        dist.reduce_scatter(grad, [ x.contiguous() for x in grad_output_slices ])
-        return grad, None
+        grad_output_slices_padded = [ padded(grad_output_slice, ctx.dim, max(ctx.sharding_lengths)).contiguous() for grad_output_slice in grad_output_slices ]
+        grad = torch.empty_like(grad_output_slices_padded[0])
+        dist.reduce_scatter(grad, [ x.contiguous() for x in grad_output_slices_padded ])
+        grad = grad.split([ctx.sharding_lengths[ctx.rank], max(ctx.sharding_lengths) - ctx.sharding_lengths[ctx.rank]], dim=ctx.dim)[0]
+        return grad, None, None, None
 
-# aliasing will prevent assigning __module__, which is required by fx.node.Node.__repr__, otherwise it crashes
-def all_gather(tensor, dim, sharding_lengths, rank): return AllGather.apply(tensor, tensor, dim, sharding_lengths, rank)
+# aliasing prevents assigning __module__, which is required by fx.node.Node.__repr__, otherwise it crashes
+def all_gather(tensor, dim, sharding_lengths, rank): return AllGather.apply(tensor, dim, sharding_lengths, rank)
 
 class AllReduce(torch.autograd.Function):
     @staticmethod
@@ -58,9 +64,9 @@ class ReduceScatter(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         grad_output = grad_output.contiguous() # similar to AllGather, this call is important. Both occurences of grad_output require contiguous.
-        grad_output_slices = [ torch.empty(sharded_shape(grad_output.shape, ctx.dim, length)) for length in ctx.sharding_lengths ]
+        grad_output_slices = [ torch.empty(sharded_shape(grad_output.shape, ctx.dim, length), device=grad_output.device) for length in ctx.sharding_lengths ]
         dist.all_gather(grad_output_slices, grad_output)
-        return torch.cat(grad_output_slices, dim=ctx.dim), None
+        return torch.cat(grad_output_slices, dim=ctx.dim), None, None, None
 
 def reduce_scatter(tensor, dim, sharding_lengths, rank): return ReduceScatter.apply(tensor, dim, sharding_lengths, rank)
 
@@ -76,7 +82,7 @@ class AllToAll(torch.autograd.Function):
     def forward(ctx, tensor, split_dim, cat_dim, split_sharding_lengths, cat_sharding_lengths, rank):
         ctx.split_dim, ctx.cat_dim, ctx.split_sharding_lengths, ctx.cat_sharding_lengths, ctx.rank = split_dim, cat_dim, split_sharding_lengths, cat_sharding_lengths, rank
         tensor_slices = torch.split(tensor.contiguous(), split_sharding_lengths, dim=split_dim)
-        out_slices = [ torch.empty(sharded_shape(tensor_slices[rank].shape, cat_dim, length)) for length in cat_sharding_lengths ]
+        out_slices = [ torch.empty(sharded_shape(tensor_slices[rank].shape, cat_dim, length), device=tensor.device) for length in cat_sharding_lengths ]
         dist.all_to_all(out_slices, [ x.contiguous() for x in tensor_slices ])
         return torch.cat(out_slices, dim=cat_dim)
 
@@ -85,7 +91,7 @@ class AllToAll(torch.autograd.Function):
         grad_output_slices = torch.split(grad_output.contiguous(), ctx.cat_sharding_lengths, dim=ctx.cat_dim)
         grad_slices = [ torch.empty_like(sharded_shape(grad_output_slices[ctx.rank].shape, ctx.split_dim, length)) for length in ctx.split_sharding_lengths ]
         dist.all_to_all(grad_slices, [ x.contiguous() for x in grad_output_slices ])
-        return torch.cat(grad_slices, dim=ctx.split_dim), None, None
+        return torch.cat(grad_slices, dim=ctx.split_dim), None, None, None, None, None
 
 def all_to_all(tensor, split_dim, cat_dim, split_sharding_lengths, cat_sharding_lengths, rank): return AllToAll.apply(tensor, split_dim, cat_dim, split_sharding_lengths, cat_sharding_lengths, rank)
 

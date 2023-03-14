@@ -138,6 +138,15 @@ macro_rules! new_usize_type {
     }
 }
 
+macro_rules! py_dict {
+    ($py:expr, $($key:ident => $value:expr),*) => {{
+        let dict = PyDict::new($py);
+        $(
+            dict.set_item($py, stringify!($key), &$value).unwrap();
+        )*
+        dict
+    }}
+}
 
 // Some names:
 // R stands for Reference (the nodes and tensors in the orignal single card graph)
@@ -751,6 +760,16 @@ impl<'py, 'r> CodegenContext<'py, 'r> {
             unreachable!()
         }
     }
+
+    fn shard_inplace(&self, name: &str, sharding_lengths: &[usize], dim: Dimension) -> PyResult<()> {
+        self.py.run("split_param_or_buffer(graph_module, target, sharding_lengths, dim, rank)", None, Some(&py_dict!(self.py,
+            graph_module => self.module,
+            target => name,
+            sharding_lengths => sharding_lengths,
+            dim => dim,
+            rank => self.rank
+        )))
+    }
 }
 
 pub struct Op {
@@ -955,16 +974,6 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
     }
 
     Ok(parsing_handlers)
-}
-
-macro_rules! py_dict {
-    ($py:expr, $($key:ident => $value:expr),*) => {{
-        let dict = PyDict::new($py);
-        $(
-            dict.set_item($py, stringify!($key), &$value).unwrap();
-        )*
-        dict
-    }}
 }
 
 fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyObject) -> PyResult<RGraph> {
@@ -1182,8 +1191,8 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                             let parameter_name = parameter_name.clone();
                             move |ctx| {
                                 let py_parameter = ctx.fx_get_attr(&parameter_name)?;
+                                ctx.shard_inplace(&parameter_name, &sharding_round(length, &ctx.sharding_ratios), dim)?;
                                 ctx.set_property_implementation(Property::gather(tensor_id, dim), py_parameter);
-                                // TODO: we need to actually copy and shard the tensor here
                                 Ok(())
                             }
                         }),
