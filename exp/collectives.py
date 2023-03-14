@@ -34,18 +34,12 @@ def all_gather(tensor, dim, sharding_lengths, rank): return AllGather.apply(tens
 class AllReduce(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tensor):
-        # hack
-        if isinstance(tensor, int):
-            ctx.hack = True
-            return tensor * dist.get_world_size()
         out_tensor = tensor.contiguous()
         dist.all_reduce(out_tensor)
         return out_tensor
 
     @staticmethod
     def backward(ctx, grad_output):
-        if getattr(ctx, 'hack', False):
-            return None, None
         grad = grad_output.clone()
         dist.all_reduce(grad)
         return grad
@@ -56,17 +50,18 @@ class ReduceScatter(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tensor, dim, sharding_lengths, rank):
         ctx.dim, ctx.sharding_lengths, ctx.rank = dim, sharding_lengths, rank
-        tensor_slices = torch.split(tensor, sharding_lengths, dim=dim)
-        out = torch.empty_like(tensor_slices[rank])
-        dist.reduce_scatter(out, [ x.contiguous() for x in tensor_slices ])
-        return out
+        tensor_slices = torch.split(tensor.contiguous(), sharding_lengths, dim=dim)
+        tensor_slices_padded = [ padded(tensor_slice, dim, max(sharding_lengths)).contiguous() for tensor_slice in tensor_slices ]
+        out = torch.empty_like(tensor_slices_padded[0])
+        dist.reduce_scatter(out, [ x.contiguous() for x in tensor_slices_padded ])
+        return out.split([sharding_lengths[rank], max(sharding_lengths) - sharding_lengths[rank]], dim=dim)[0]
 
     @staticmethod
     def backward(ctx, grad_output):
-        grad_output = grad_output.contiguous() # similar to AllGather, this call is important. Both occurences of grad_output require contiguous.
-        grad_output_slices = [ torch.empty(sharded_shape(grad_output.shape, ctx.dim, length), device=grad_output.device) for length in ctx.sharding_lengths ]
-        dist.all_gather(grad_output_slices, grad_output)
-        return torch.cat(grad_output_slices, dim=ctx.dim), None, None, None
+        grad_output_slices = [ torch.empty(*sharded_shape(grad_output.shape, ctx.dim, max(ctx.sharding_lengths)), device=grad_output.device) for _ in ctx.sharding_lengths ]
+        dist.all_gather(grad_output_slices, padded(grad_output.contiguous(), ctx.dim, max(ctx.sharding_lengths)).contiguous())
+        grad = torch.cat([ grad_output_slice.split([sharding_length, max(ctx.sharding_lengths) - sharding_length], dim=ctx.dim)[0] for grad_output_slice, sharding_length in zip(grad_output_slices, ctx.sharding_lengths) ], dim=ctx.dim)
+        return grad, None, None, None
 
 def reduce_scatter(tensor, dim, sharding_lengths, rank): return ReduceScatter.apply(tensor, dim, sharding_lengths, rank)
 
@@ -76,7 +71,7 @@ def dynamic_slice(tensor, dim, sharding_lengths, rank):
     return tensor_slices[rank].contiguous()
 
 # Actually there is an "all_to_all_single" that do the chunking and cating for us: https://github.com/pytorch/pytorch/blob/master/torch/distributed/distributed_c10d.py#L2404
-# similar versions exist for other collectives. It should be perferable in terms of performance (and deepspeed uses them)
+# similar versions exist for other collectives. They should be preferred in terms of performance (and deepspeed uses them)
 class AllToAll(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tensor, split_dim, cat_dim, split_sharding_lengths, cat_sharding_lengths, rank):
@@ -89,7 +84,7 @@ class AllToAll(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         grad_output_slices = torch.split(grad_output.contiguous(), ctx.cat_sharding_lengths, dim=ctx.cat_dim)
-        grad_slices = [ torch.empty_like(sharded_shape(grad_output_slices[ctx.rank].shape, ctx.split_dim, length)) for length in ctx.split_sharding_lengths ]
+        grad_slices = [ torch.empty(sharded_shape(grad_output_slices[ctx.rank].shape, ctx.split_dim, length), device=grad_output.device) for length in ctx.split_sharding_lengths ]
         dist.all_to_all(grad_slices, [ x.contiguous() for x in grad_output_slices ])
         return torch.cat(grad_slices, dim=ctx.split_dim), None, None, None, None, None
 
@@ -108,3 +103,120 @@ class Replicate(torch.autograd.Function):
         return grad
 
 def replicate(tensor): return Replicate.apply(tensor)
+
+
+# simple tests on 4 GPUs
+
+def test(rank):
+    import torch.distributed as dist
+    import datetime
+    dist.init_process_group('nccl', rank=rank, timeout=datetime.timedelta(hours=2))
+
+    class Mod1(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p = torch.nn.Parameter(torch.ones(5, rank+1))
+
+        def forward(self):
+            return all_gather(self.p, 1, [1,2,3,4], rank).sum() / 4
+
+    print("testing all_gather")
+    mod = Mod1().cuda(rank)
+    loss = mod.forward()
+    loss.backward()
+    print(rank, loss, mod.p.grad, flush=True) # expecting: losses are the same, grads are 1
+    dist.barrier()
+
+    class Mod2(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p = torch.nn.Parameter(torch.ones(5, 4) * rank)
+
+        def forward(self):
+            return all_reduce(self.p).sum() / 4
+
+    print("testing all_reduce")
+    mod = Mod2().cuda(rank)
+    loss = mod.forward()
+    loss.backward()
+    print(rank, loss, mod.p.grad, flush=True) # expecting: losses are the same, grads are 1
+    dist.barrier()
+
+    class Mod3(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p = torch.nn.Parameter(torch.ones(5, 10))
+
+        def forward(self):
+            return reduce_scatter(self.p, 1, [1,2,3,4], rank).sum()
+
+    print("testing reduce_scatter")
+    mod = Mod3().cuda(rank)
+    loss = mod.forward()
+    loss.backward()
+    print(rank, loss, mod.p.grad, flush=True) # expecting: losses propotional to rank, grads are 1
+    dist.barrier()
+
+    class Mod4(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p = torch.nn.Parameter(torch.ones(5, 10))
+
+        def forward(self):
+            return dynamic_slice(self.p, 1, [1,2,3,4], rank).sum()
+
+    print("testing dynamic_slice")
+    mod = Mod4().cuda(rank)
+    loss = mod.forward()
+    loss.backward()
+    print(rank, loss, mod.p.grad, flush=True) # expecting: losses propotional to rank, grads are partially 1
+    dist.barrier()
+
+    class Mod5(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p = torch.nn.Parameter(torch.ones(10, rank+1))
+
+        def forward(self):
+            return all_to_all(self.p, 0, 1, [4,3,2,1], [1,2,3,4], rank).sum()
+
+    print("testing all_to_all")
+    mod = Mod5().cuda(rank)
+    loss = mod.forward()
+    loss.backward()
+    print(rank, loss, mod.p.grad, flush=True) # expecting: losses are reverse propotional to rank, grads are 1
+    dist.barrier()
+
+    class Mod6(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p = torch.nn.Parameter(torch.ones(5, 5))
+
+        def forward(self):
+            return replicate(self.p).sum() / 4
+
+    print("testing replicate")
+    mod = Mod6().cuda(rank)
+    loss = mod.forward()
+    loss.backward()
+    print(rank, loss, mod.p.grad, flush=True) # expecting: losses are the same, grads are 1
+    dist.barrier()
+
+if __name__ == '__main__':
+    if torch.cuda.device_count() < 4:
+        print("Not enough GPUs")
+        raise SystemExit
+
+    import os
+    os.environ['MASTER_ADDR'] = "127.0.0.1"
+    os.environ['MASTER_PORT'] = "39393"
+    os.environ['WORLD_SIZE'] = "4"
+
+    import torch.multiprocessing as mp
+    mp.set_start_method('spawn')
+
+    for rank in range(4):
+        mp.Process(target=test, args=(rank, )).start()
+
+    for p in mp.active_children():
+        p.join()
