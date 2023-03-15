@@ -12,9 +12,9 @@ model_name = "Tmlp"
 # model_name = "Vswitch"
 
 world_size = 4
-nlayers = 2
+nlayers = 8
 n_expert = 2 * world_size
-batch_size = 32 * world_size
+batch_size = 320 * world_size
 seqlen = 128
 if model_name.startswith('V'):
     seqlen = 64
@@ -28,7 +28,7 @@ nhid = emsize * 4
 dropout = 0.1
 nheads = 12
 
-master_addr = "127.0.0.1"
+master_addr = "10.28.1.27"
 master_port = 39262
 
 # trace = True

@@ -41,6 +41,8 @@ def split_param_or_buffer(graph_module, target, sharding_lengths, dim, rank):
     p.data = torch.split(p.data, sharding_lengths, dim)[rank]
 "#;
 
+static static_sharding_ratios: [f64; 4] = [0.3, 0.3, 0.2, 0.2];
+
 cpython::py_module_initializer!(hetspmd, |py, m| {
     if !CTRLC_TRAPPED.load(std::sync::atomic::Ordering::Relaxed) {
         ctrlc::set_handler(|| {
@@ -94,7 +96,7 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         best_program.show(&triple_set);
 
         let mut codegen_context = CodegenContext::new(
-            py, py_graph_module, &rgraph, 0, vec![0.1, 0.2, 0.3, 0.4]
+            py, py_graph_module, &rgraph, get_config!("rank"), static_sharding_ratios.to_vec()
         )?;
 
         best_program.codegen(&triple_set, &mut codegen_context)?;
@@ -396,7 +398,7 @@ impl Program {
 
         remove_irrelavent_properties(&mut properties, &triple_set);
 
-        let cost = self.cost + triple.get_cost(profiler, &[0.1, 0.2, 0.3, 0.4]);
+        let cost = self.cost + triple.get_cost(profiler, &static_sharding_ratios);
         let ecost = 0.0;
 
         Program { triple_ids: triples, properties, cost, ecost }

@@ -30,7 +30,8 @@ def run(global_rank, local_rank):
         "all_reduce_bandwidth": 611692856.,
         "all_gather_bandwidth": 1224592728.,
         "reduce_scatter_bandwidth": 1130230706.,
-        "all_to_all_bandwidth": 10701240728.
+        "all_to_all_bandwidth": 10701240728.,
+        "rank": global_rank
     })
 
     # print(dgraph, flush=True)

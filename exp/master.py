@@ -20,7 +20,8 @@ dgraph = hetspmd.main(model, {
     "all_reduce_bandwidth": 611692856.,
     "all_gather_bandwidth": 1224592728.,
     "reduce_scatter_bandwidth": 1130230706.,
-    "all_to_all_bandwidth": 10701240728.
+    "all_to_all_bandwidth": 10701240728.,
+    "rank": 0
 })
 
 # print(dgraph, flush=True)
