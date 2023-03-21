@@ -17,40 +17,44 @@ def run(global_rank, local_rank):
     dist.init_process_group('nccl', rank=global_rank, timeout=datetime.timedelta(hours=2))
 
     model = config.get_model(seed=39).cuda(local_rank)
-    model = DDP(model, device_ids=[local_rank])
+    dmodel = DDP(model, device_ids=[local_rank])
+    del model
 
-    # optimizer = torch.optim.SGD(model.parameters(), lr=config.lr)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+    optimizer = torch.optim.Adam(dmodel.parameters(), lr=config.lr)
     train_data = config.get_data()[1]
 
-    print("here")
-
     result_times = []
-    last_iter_time = time.time()
+    strat_time = last_iter_time = time.time()
+    total_loss = 0
     for iter in range(config.run_iter):
         optimizer.zero_grad()
         x, y = next(train_data)
         x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
         y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+
         with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
-            loss = model(x) * config.world_size # DDP seems to average the losses
+            loss = dmodel(x) * config.world_size # DDP averages the loss
+
         aggregated_loss = loss.detach().clone()
         dist.reduce(aggregated_loss, 0)
         if global_rank == 0:
-            print(f"loss {iter}:", aggregated_loss.cpu().numpy() / config.world_size)
+            total_loss += aggregated_loss.cpu().numpy() / config.batch_size / config.seqlen
+            if iter % config.log_iter == 0:
+                print(f"loss (log ppl) {iter}: {total_loss / config.log_iter:.3f}, wall clock: {time.time() - strat_time:.3f}")
+                total_loss = 0
         # dist.barrier(device_ids=[global_rank])
 
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        torch.nn.utils.clip_grad_norm_(dmodel.parameters(), 0.5)
         # torch.cuda.synchronize()
         optimizer.step()
         # dist.barrier()
-        if local_rank == 0:
+        if config.report_per_iter_time and local_rank == 0:
             iter_duration = time.time() - last_iter_time
-            print("iter time: ", iter_duration)
             result_times.append(iter_duration)
-            print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
             last_iter_time += iter_duration
+            print("iter time: ", iter_duration)
+            print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
 
     if not config.trace:
         return
@@ -67,7 +71,7 @@ def run(global_rank, local_rank):
         for _ in range(15):
             with record_function("forward"):
                 with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
-                    loss = model(x, y)
+                    loss = dmodel(x)
             with record_function("backward"):
                 loss.backward()
                 torch.cuda.synchronize()

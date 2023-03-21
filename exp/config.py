@@ -14,7 +14,7 @@ model_name = "Tmlp"
 world_size = 4
 nlayers = 8
 n_expert = 2 * world_size
-batch_size = 320 * world_size
+batch_size = 32 * world_size
 seqlen = 128
 if model_name.startswith('V'):
     seqlen = 64
@@ -31,8 +31,8 @@ nheads = 12
 master_addr = "10.28.1.27"
 master_port = 39262
 
-# trace = True
-trace = False
+trace = True
+# trace = False
 
 # use_hints = True
 use_hints = False
@@ -45,7 +45,7 @@ profile_noise = 0
 
 lr = 5e-4
 
-run_iter = 100
+run_iter = 50
 avg_iter = 20
 log_iter = 20
 

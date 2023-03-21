@@ -2,7 +2,6 @@ import config
 import sys
 import datetime
 import time
-import math
 import torch
 import torch.fx
 from torch.profiler import profile, record_function, ProfilerActivity
@@ -17,7 +16,6 @@ def run(global_rank, local_rank):
     dist.init_process_group('nccl', rank=global_rank, timeout=datetime.timedelta(hours=2))
 
     model = symbolic_trace(config.get_model(seed=39))
-    print(model.code, flush=True)
 
     for i, node in enumerate(model.graph.nodes):
         node.meta['id'] = i
@@ -26,17 +24,18 @@ def run(global_rank, local_rank):
 
     dgraph = hetspmd.main(model, {
         "input_shape": config.input_shape(),
-        "device_flops": [4139214925014.] * 4,
-        "all_reduce_bandwidth": 611692856.,
-        "all_gather_bandwidth": 1224592728.,
-        "reduce_scatter_bandwidth": 1130230706.,
-        "all_to_all_bandwidth": 10701240728.,
+        "device_flops": [config.profiler_data["device_flops"]] * 4,
+        "all_reduce_bandwidth": config.profiler_data["all_reduce"],
+        "all_gather_bandwidth": config.profiler_data["all_gather"],
+        "reduce_scatter_bandwidth": config.profiler_data["reduce_scatter"],
+        "all_to_all_bandwidth": config.profiler_data["all_to_all"],
         "rank": global_rank
     })
 
     # print(dgraph, flush=True)
 
     dmodel = torch.fx.GraphModule(model, dgraph).cuda(local_rank)
+    del model
 
     optimizer = torch.optim.Adam(dmodel.parameters(), lr=config.lr)
     train_data = config.get_data()[1]
@@ -113,7 +112,7 @@ def run(global_rank, local_rank):
         for _ in range(15):
             with record_function("forward"):
                 with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
-                    loss = model(x, y)
+                    loss = dmodel(x)
             with record_function("backward"):
                 loss.backward()
                 torch.cuda.synchronize()

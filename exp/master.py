@@ -16,11 +16,11 @@ hetspmd.init()
 
 dgraph = hetspmd.main(model, {
     "input_shape": config.input_shape(),
-    "device_flops": [4139214925014.] * 4,
-    "all_reduce_bandwidth": 611692856.,
-    "all_gather_bandwidth": 1224592728.,
-    "reduce_scatter_bandwidth": 1130230706.,
-    "all_to_all_bandwidth": 10701240728.,
+    "device_flops": [config.profiler_data["device_flops"]] * 4,
+    "all_reduce_bandwidth": config.profiler_data["all_reduce"],
+    "all_gather_bandwidth": config.profiler_data["all_gather"],
+    "reduce_scatter_bandwidth": config.profiler_data["reduce_scatter"],
+    "all_to_all_bandwidth": config.profiler_data["all_to_all"],
     "rank": 0
 })
 

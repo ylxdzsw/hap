@@ -1571,4 +1571,3 @@ fn sharding_round(full_length: usize, sharding_ratios: &[f64]) -> Vec<usize> {
     }
     sharding_lengths
 }
-
