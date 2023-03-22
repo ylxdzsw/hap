@@ -17,6 +17,7 @@ class TMLP(torch.nn.Module):
     def forward(self, x, y=None):
         for layer in self.layers:
             x = layer(x)
+            x = new_segment(x)
         return torch.sum(x)
 
 class TMLP2(torch.nn.Module):
@@ -458,3 +459,7 @@ class PatchEmbed(torch.nn.Module):
         x = self.proj(x)
         x = x.flatten(2).transpose(1, 2)  # BCHW -> BNC
         return x
+
+# TODO: make it accepting multiple arguments?
+def new_segment(x):
+    return x

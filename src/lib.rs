@@ -2,7 +2,7 @@
 #![allow(non_upper_case_globals)]
 #![feature(let_chains)]
 
-use std::ops::{Index, IndexMut, Add};
+use std::ops::{Index, IndexMut, Add, Mul, Div};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -132,13 +132,15 @@ macro_rules! new_usize_type {
             }
         }
 
-        impl Display for $type_name {
-            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        impl std::fmt::Display for $type_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}", self.0)
             }
         }
     }
 }
+
+pub(crate) use new_usize_type;
 
 macro_rules! py_dict {
     ($py:expr, $($key:ident => $value:expr),*) => {{
@@ -161,6 +163,7 @@ new_usize_type!(pub, RNodeId);
 new_usize_type!(pub, RTensorId);
 new_usize_type!(pub, DNodeId);
 new_usize_type!(pub, DTensorId);
+new_usize_type!(pub, SegmentId);
 
 pub struct HoareTriple {
     pre_conditions: SVec<Property, 4>,
@@ -266,7 +269,10 @@ impl HoareTriple {
             (computation_time, communication_time)
         }).unzip();
 
-        computation_times.into_iter().map(FloatOrd).max().unwrap().0 + communication_times.into_iter().map(FloatOrd).max().unwrap().0
+        let computation_time = computation_times.into_iter().map(|x| x.instantialize(sharding_ratios)).map(FloatOrd).max().unwrap().0;
+        let communication_time = communication_times.into_iter().map(|x| x.instantialize(sharding_ratios)).map(FloatOrd).max().unwrap().0;
+
+        computation_time + communication_time
     }
 
     fn fuse_into(&self, consumer: &HoareTriple) -> HoareTriple {
@@ -323,13 +329,13 @@ struct Profiler<'r, 'c> {
     cluster_info: &'c ClusterInfo,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct Profile {
-    flops: f64,
-    all_reduce: f64,
-    all_gather: f64,
-    all_to_all: f64,
-    reduce_scatter: f64,
+    flops: Expression,
+    all_reduce: Expression,
+    all_gather: Expression,
+    all_to_all: Expression,
+    reduce_scatter: Expression,
 }
 
 impl Add for Profile {
@@ -1176,7 +1182,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         move |ctx| {
                             let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
                             let forward_profile = Default::default();
-                            let backward_profile = Profile { all_reduce: size as f64, ..Default::default() };
+                            let backward_profile = Profile { all_reduce: (size as f64).into(), ..Default::default() };
                             (forward_profile, backward_profile)
                         }
                     })
@@ -1244,8 +1250,8 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 }),
                 Rc::new(move |ctx| {
                     let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
-                    let forward_profile = Profile { all_gather: size as f64, ..Default::default() };
-                    let backward_profile = Profile { reduce_scatter: size as f64, ..Default::default() };
+                    let forward_profile = Profile { all_gather: (size as f64).into(), ..Default::default() };
+                    let backward_profile = Profile { reduce_scatter: (size as f64).into(), ..Default::default() };
                     (forward_profile, backward_profile)
                 })
             );
@@ -1275,8 +1281,8 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 }),
                 Rc::new(move |ctx| {
                     let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
-                    let forward_profile = Profile { reduce_scatter: size as f64, ..Default::default() };
-                    let backward_profile = Profile { all_gather: size as f64, ..Default::default() };
+                    let forward_profile = Profile { reduce_scatter: (size as f64).into(), ..Default::default() };
+                    let backward_profile = Profile { all_gather: (size as f64).into(), ..Default::default() };
                     (forward_profile, backward_profile)
                 })
             );
@@ -1294,8 +1300,8 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
             }),
             Rc::new(move |ctx| {
                 let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
-                let forward_profile = Profile { all_reduce: size as f64, ..Default::default() };
-                let backward_profile = Profile { all_reduce: size as f64, ..Default::default() };
+                let forward_profile = Profile { all_reduce: (size as f64).into(), ..Default::default() };
+                let backward_profile = Profile { all_reduce: (size as f64).into(), ..Default::default() };
                 (forward_profile, backward_profile)
             })
         );
@@ -1322,8 +1328,8 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         }),
                         Rc::new(move |ctx| {
                             let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
-                            let forward_profile = Profile { all_to_all: size as f64, ..Default::default() };
-                            let backward_profile = Profile { all_to_all: size as f64, ..Default::default() };
+                            let forward_profile = Profile { all_to_all: (size as f64).into(), ..Default::default() };
+                            let backward_profile = Profile { all_to_all: (size as f64).into(), ..Default::default() };
                             (forward_profile, backward_profile)
                         })
                     );
@@ -1362,8 +1368,8 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
             Rc::new(move |ctx| {
                 let shapes: Vec<_> = pre_conditions.iter().map(|p| ctx.get_shape_by_property(*p)).collect();
                 let flops = (op.flops)(&shapes);
-                let forward_profile = Profile { flops, ..Default::default() };
-                let backward_profile = Profile { flops: 2. * flops, ..Default::default() };
+                let forward_profile = Profile { flops: flops.into(), ..Default::default() };
+                let backward_profile = Profile { flops: (2. * flops).into(), ..Default::default() };
                 (forward_profile, backward_profile)
             })
         )
@@ -1570,4 +1576,160 @@ fn sharding_round(full_length: usize, sharding_ratios: &[f64]) -> Vec<usize> {
         sharding_lengths[max_diff_index] += 1;
     }
     sharding_lengths
+}
+
+fn sharding_symbolic(full_length: usize, sharding_ratios: &[Expression]) -> Vec<Expression> {
+    sharding_ratios.iter().map(|x| x.clone() * (full_length as f64)).collect()
+}
+
+new_usize_type!(pub, SymbolId);
+
+#[derive(Debug, Clone)]
+enum Expression {
+    Symbol(SymbolId, f64),
+    Constant(f64),
+    Linear(Vec<f64>, f64)
+}
+
+impl Expression {
+    fn symbol(symbol_id: SymbolId) -> Self {
+        Expression::Symbol(symbol_id, 1.)
+    }
+
+    fn constant(value: f64) -> Self {
+        Expression::Constant(value)
+    }
+
+    fn to_linear(self) -> Self {
+        match self {
+            Expression::Symbol(symbol_id, coefficient) => {
+                let mut coefficients = vec![0.; symbol_id.0 + 1];
+                coefficients[symbol_id.0] = coefficient;
+                Expression::Linear(coefficients, 0.)
+            }
+            Expression::Constant(value) => Expression::Linear(vec![], value),
+            Expression::Linear(_, _) => self
+        }
+    }
+
+    fn instantialize(&self, symbol_values: &[f64]) -> f64 {
+        match self {
+            Expression::Symbol(symbol_id, coefficient) => symbol_values[symbol_id.0] * coefficient,
+            Expression::Constant(value) => *value,
+            Expression::Linear(coefficients, constant) => {
+                let mut value = *constant;
+                for (i, coefficient) in coefficients.iter().enumerate() {
+                    value += symbol_values[i] * coefficient;
+                }
+                value
+            }
+        }
+    }
+
+    fn unwrap_constant(&self) -> f64 {
+        match self {
+            Expression::Constant(value) => *value,
+            _ => panic!("Expression is not a constant")
+        }
+    }
+}
+
+impl Add for Expression {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            // fallback implementation
+            (Expression::Linear(lhs_coefficients, lhs_constant), Expression::Linear(rhs_coefficients, rhs_constant)) => {
+                let mut coefficients = vec![0.; lhs_coefficients.len().max(rhs_coefficients.len())];
+                for (i, coefficient) in lhs_coefficients.into_iter().enumerate() {
+                    coefficients[i] += coefficient;
+                }
+                for (i, coefficient) in rhs_coefficients.into_iter().enumerate() {
+                    coefficients[i] += coefficient;
+                }
+                Expression::Linear(coefficients, lhs_constant + rhs_constant)
+            }
+
+            // specialized implementation
+            (Expression::Symbol(lhs_symbol_id, lhs_coefficient), Expression::Symbol(rhs_symbol_id, rhs_coefficient)) if lhs_symbol_id == rhs_symbol_id => {
+                Expression::Symbol(lhs_symbol_id, lhs_coefficient + rhs_coefficient)
+            }
+            (Expression::Constant(lhs_constant), Expression::Constant(rhs_constant)) => {
+                Expression::Constant(lhs_constant + rhs_constant)
+            }
+
+            // catch-all
+            (lhs @ _, rhs @ _) => lhs.to_linear() + rhs.to_linear()
+        }
+    }
+}
+
+impl Add<f64> for Expression {
+    type Output = Self;
+
+    fn add(self, rhs: f64) -> Self::Output {
+        self + Expression::constant(rhs)
+    }
+}
+
+impl Add<Expression> for f64 {
+    type Output = Expression;
+
+    fn add(self, rhs: Expression) -> Self::Output {
+        Expression::constant(self) + rhs
+    }
+}
+
+impl Mul for Expression {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Expression::Symbol(symbol_id, coefficient), Expression::Constant(constant)) => {
+                Expression::Symbol(symbol_id, coefficient * constant)
+            }
+            (Expression::Constant(lhs_constant), Expression::Constant(rhs_constant)) => {
+                Expression::Constant(lhs_constant * rhs_constant)
+            }
+
+            _ => panic!("quadratic expression")
+        }
+    }
+}
+
+impl Mul<f64> for Expression {
+    type Output = Self;
+
+    fn mul(self, rhs: f64) -> Self::Output {
+        self * Expression::constant(rhs)
+    }
+}
+
+impl Mul<Expression> for f64 {
+    type Output = Expression;
+
+    fn mul(self, rhs: Expression) -> Self::Output {
+        Expression::constant(self) * rhs
+    }
+}
+
+impl Div<f64> for Expression {
+    type Output = Self;
+
+    fn div(self, rhs: f64) -> Self::Output {
+        self * (1. / rhs)
+    }
+}
+
+impl Default for Expression {
+    fn default() -> Self {
+        Expression::Constant(0.)
+    }
+}
+
+impl<T: Into<f64>> From<T> for Expression {
+    fn from(value: T) -> Self {
+        Expression::Constant(value.into())
+    }
 }
