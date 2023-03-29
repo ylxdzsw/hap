@@ -2,9 +2,10 @@
 #![allow(non_upper_case_globals)]
 #![feature(let_chains)]
 
+use std::iter::Product;
 use std::ops::{Index, IndexMut, Add, Mul, Div};
 use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt::{Display, Debug, Formatter};
 use std::cmp::Ordering;
@@ -16,6 +17,7 @@ pub type SVec<T, const N: usize = 1> = SmallVec<[T; N]>;
 
 type Dimension = u8;
 type Shape = SVec<usize, 4>;
+type SymbolicShape = SVec<Expression, 4>;
 
 static CTRLC_TRAPPED: AtomicBool = AtomicBool::new(false);
 static CTRLC_RECEIVED: AtomicBool = AtomicBool::new(false);
@@ -40,8 +42,6 @@ def split_param_or_buffer(graph_module, target, sharding_lengths, dim, rank):
         p = graph_module.get_buffer(target)
     p.data = torch.split(p.data, sharding_lengths, dim)[rank]
 "#;
-
-static static_sharding_ratios: [f64; 4] = [0.3, 0.3, 0.2, 0.2];
 
 cpython::py_module_initializer!(hetspmd, |py, m| {
     if !CTRLC_TRAPPED.load(std::sync::atomic::Ordering::Relaxed) {
@@ -84,6 +84,7 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
             all_to_all_bandwidth: get_config!("all_to_all_bandwidth")
         };
 
+        // todo: merge into context?
         let profiler = Profiler {
             rgraph: &rgraph,
             cluster_info: &cluster_info
@@ -91,12 +92,41 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
 
         let triple_set = IndexedHoareTripleSet::new(triples);
 
-        let best_program = a_star(&triple_set, &default_properties, &profiler);
+        let symbol_id_counter = AtomicUsize::new(0);
+        let sharding_ratios = (0..rgraph.n_segments).map(|s| {
+            (0..cluster_info.n_devices()).map(|d| {
+                SymbolId(symbol_id_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            }).collect::<Vec<_>>()
+        }).collect::<Vec<_>>();
+
+        let computation_power_sum = cluster_info.device_flops.iter().sum::<f64>();
+        let computation_power_ratio = cluster_info.device_flops.iter().map(|f| f / computation_power_sum).collect::<Vec<_>>();
+        let mut symbol_values = vec![0.; symbol_id_counter.load(std::sync::atomic::Ordering::Relaxed)];
+        for segment_sharding_ratio in sharding_ratios.iter() {
+            for (sharding_ratio, computation_power_ratio) in segment_sharding_ratio.iter().zip(computation_power_ratio.iter()) {
+                symbol_values[sharding_ratio.0] = *computation_power_ratio;
+            }
+        }
+
+        let sharding_ratios_exp = sharding_ratios.iter().map(|s| {
+            s.iter().map(|d| Expression::symbol(*d)).collect()
+        }).collect::<Vec<_>>();
+
+        let a_star_context = AStarContext {
+            triple_set: &triple_set,
+            sharding_ratios: &sharding_ratios_exp,
+            symbol_values: &symbol_values
+        };
+
+        let best_program = a_star(&a_star_context, &default_properties, &profiler);
         eprintln!("===== Result =====\n\n");
         best_program.show(&triple_set);
 
         let mut codegen_context = CodegenContext::new(
-            py, py_graph_module, &rgraph, get_config!("rank"), static_sharding_ratios.to_vec()
+            py, py_graph_module, &rgraph, get_config!("rank"),
+            sharding_ratios.iter().map(|s| {
+                s.iter().map(|d| Expression::symbol(*d).instantialize(&symbol_values)).collect()
+            }).collect()
         )?;
 
         best_program.codegen(&triple_set, &mut codegen_context)?;
@@ -249,9 +279,8 @@ pub enum TensorRelation {
 }
 
 impl HoareTriple {
-    fn get_cost(&self, profiler: &Profiler, sharding_ratios: &[f64]) -> f64 {
-        // idea: may cache the cost of each triple while using the same sharding ratios
-        let (computation_times, communication_times): (Vec<_>, Vec<_>) = (0..sharding_ratios.len()).map(|i| {
+    fn get_cost_symbolic(&self, profiler: &Profiler, sharding_ratios: &[Vec<Expression>]) -> (Vec<Expression>, Vec<Expression>) {
+        let (computation_times, communication_times): (Vec<_>, Vec<_>) = (0..profiler.cluster_info.n_devices()).map(|i| {
             // TODO: a lot of unnecessary work. Need benchmark.
             let mut profile_context = ProfileContext {
                 profiler,
@@ -269,8 +298,15 @@ impl HoareTriple {
             (computation_time, communication_time)
         }).unzip();
 
-        let computation_time = computation_times.into_iter().map(|x| x.instantialize(sharding_ratios)).map(FloatOrd).max().unwrap().0;
-        let communication_time = communication_times.into_iter().map(|x| x.instantialize(sharding_ratios)).map(FloatOrd).max().unwrap().0;
+        (computation_times, communication_times)
+    }
+
+    fn get_cost(&self, profiler: &Profiler, sharding_ratios: &[Vec<Expression>], symbol_values: &[f64]) -> f64 {
+        // idea: may cache the cost of each triple while using the same sharding ratios
+        let (computation_times, communication_times) = self.get_cost_symbolic(profiler, sharding_ratios);
+
+        let computation_time = computation_times.into_iter().map(|x| x.instantialize(symbol_values)).map(FloatOrd).max().unwrap().0;
+        let communication_time = communication_times.into_iter().map(|x| x.instantialize(symbol_values)).map(FloatOrd).max().unwrap().0;
 
         computation_time + communication_time
     }
@@ -354,20 +390,20 @@ impl Add for Profile {
 
 struct ProfileContext<'p, 's, 'r, 'c> {
     profiler: &'p Profiler<'r, 'c>,
-    sharding_ratios: &'s [f64],
+    sharding_ratios: &'s [Vec<Expression>],
     device_index: usize
 }
 
 impl<'p, 's, 'r, 'c> ProfileContext<'p, 's, 'r, 'c> {
-    fn get_shape_by_property(&self, property: Property) -> Shape {
+    fn get_shape_by_property(&self, property: Property) -> SymbolicShape {
         if let Property::HasTensor(tensor_id, rel) = property {
-            let raw_shape = &self.profiler.rgraph[tensor_id].shape;
+            let tensor = &self.profiler.rgraph[tensor_id];
             match rel {
-                TensorRelation::Identity | TensorRelation::Reduce => raw_shape.clone(),
+                TensorRelation::Identity | TensorRelation::Reduce => tensor.shape.iter().map(|s| Expression::constant(*s as _)).collect(),
                 TensorRelation::Gather(dim) => {
                     let dim = dim as usize;
-                    let mut shape = raw_shape.clone();
-                    shape[dim] = sharding_round(shape[dim], self.sharding_ratios)[self.device_index];
+                    let mut shape: SymbolicShape = tensor.shape.iter().map(|s| Expression::constant(*s as _)).collect();
+                    shape[dim] = sharding_symbolic(tensor.shape[dim], &self.sharding_ratios[tensor.segment_id.0])[self.device_index].clone(); // unnecessary clone
                     shape
                 }
             }
@@ -390,11 +426,11 @@ impl Program {
         Program { properties: properties.into_iter().collect(), ..Default::default() }
     }
 
-    fn with_a_new_triple(&self, triple_id: HoareTripleId, triple_set: &IndexedHoareTripleSet, profiler: &Profiler) -> Program {
+    fn with_a_new_triple(&self, ctx: &AStarContext, triple_id: HoareTripleId, profiler: &Profiler) -> Program {
         let mut triples = self.triple_ids.clone();
         triples.push(triple_id);
 
-        let triple = &triple_set[triple_id];
+        let triple = &ctx.triple_set[triple_id];
 
         let mut properties = self.properties.iter()
             .filter(|p| !triple.negative_post_conditions.contains(p))
@@ -402,9 +438,9 @@ impl Program {
             .cloned()
             .collect();
 
-        remove_irrelavent_properties(&mut properties, &triple_set);
+        remove_irrelavent_properties(&mut properties, &ctx.triple_set);
 
-        let cost = self.cost + triple.get_cost(profiler, &static_sharding_ratios);
+        let cost = self.cost + triple.get_cost(profiler, &ctx.sharding_ratios, &ctx.symbol_values);
         let ecost = 0.0;
 
         Program { triple_ids: triples, properties, cost, ecost }
@@ -540,6 +576,12 @@ impl Drop for Ticker {
     }
 }
 
+struct AStarContext<'t, 's, 'v> {
+    triple_set: &'t IndexedHoareTripleSet,
+    sharding_ratios: &'s [Vec<Expression>],
+    symbol_values: &'v [f64]
+}
+
 new_usize_type!(pub, HoareTripleId);
 
 struct IndexedHoareTripleSet {
@@ -584,7 +626,7 @@ impl Index<HoareTripleId> for IndexedHoareTripleSet {
     }
 }
 
-fn a_star(triple_set: &IndexedHoareTripleSet, initial_properties: &[Property], profiler: &Profiler) -> Program {
+fn a_star(ctx: &AStarContext, initial_properties: &[Property], profiler: &Profiler) -> Program {
     let mut heap = BinaryHeap::new();
     let mut best_program: Option<Program> = None;
     let mut property_cache: BTreeMap<BTreeSet<Property>, f64> = BTreeMap::new();
@@ -616,8 +658,8 @@ fn a_star(triple_set: &IndexedHoareTripleSet, initial_properties: &[Property], p
                 best_program = Some(program);
             }
         } else {
-            for triple_id in program.find_available_triples(&triple_set) {
-                let new_program = program.with_a_new_triple(triple_id, &triple_set, profiler);
+            for triple_id in program.find_available_triples(&ctx.triple_set) {
+                let new_program = program.with_a_new_triple(ctx, triple_id, profiler);
                 if let Some(&cached_cost) = property_cache.get(&new_program.properties) && cached_cost <= new_program.cost {
                     continue
                 }
@@ -636,6 +678,7 @@ fn a_star(triple_set: &IndexedHoareTripleSet, initial_properties: &[Property], p
 pub struct RGraph {
     nodes: Vec<RNode>,
     tensors: Vec<RTensor>,
+    n_segments: usize,
 }
 
 #[derive(Debug)]
@@ -659,6 +702,7 @@ pub struct RTensor {
     producer: RNodeId,
     consumers: SVec<RNodeId>,
 
+    segment_id: SegmentId,
     shape: Shape,
     communicatable: bool, // hints automatically generated for certain operatios (outputs of adaptive nodes are not communicatble), can be override by user annotation
 }
@@ -708,13 +752,13 @@ struct CodegenContext<'py, 'r> {
     rgraph: &'r RGraph, // only to provide shape information
 
     rank: usize,
-    sharding_ratios: Vec<f64>,
+    sharding_ratios: Vec<Vec<f64>>,
 
     property_implementation: BTreeMap<Property, PyObject>
 }
 
 impl<'py, 'r> CodegenContext<'py, 'r> {
-    fn new(py: Python<'py>, module: PyObject, rgraph: &'r RGraph, rank: usize, sharding_ratios: Vec<f64>) -> PyResult<Self> {
+    fn new(py: Python<'py>, module: PyObject, rgraph: &'r RGraph, rank: usize, sharding_ratios: Vec<Vec<f64>>) -> PyResult<Self> {
         let graph = py.eval("torch.fx.Graph()", None, None)?;
 
         Ok(Self {
@@ -754,13 +798,13 @@ impl<'py, 'r> CodegenContext<'py, 'r> {
 
     fn get_shape_by_property(&self, property: Property) -> Shape {
         if let Property::HasTensor(tensor_id, rel) = property {
-            let raw_shape = &self.rgraph[tensor_id].shape;
+            let tensor = &self.rgraph[tensor_id];
             match rel {
-                TensorRelation::Identity | TensorRelation::Reduce => raw_shape.clone(),
+                TensorRelation::Identity | TensorRelation::Reduce => tensor.shape.clone(),
                 TensorRelation::Gather(dim) => {
                     let dim = dim as usize;
-                    let mut shape = raw_shape.clone();
-                    shape[dim] = sharding_round(shape[dim], &self.sharding_ratios)[self.rank];
+                    let mut shape = tensor.shape.clone();
+                    shape[dim] = sharding_round(shape[dim], &self.sharding_ratios[tensor.segment_id.0])[self.rank];
                     shape
                 }
             }
@@ -783,7 +827,7 @@ impl<'py, 'r> CodegenContext<'py, 'r> {
 pub struct Op {
     py_name: String,
     codegen: Box<dyn Fn(Python, &PyObject, &[PyObject]) -> PyResult<SVec<PyObject, 1>>>,
-    flops: Box<dyn Fn(&[Shape]) -> f64>,
+    flops: Box<dyn Fn(&[SymbolicShape]) -> Expression>,
 }
 
 impl Debug for Op {
@@ -794,9 +838,10 @@ impl Debug for Op {
     }
 }
 
-struct ParserContext<'py, 'g, 'r> {
+struct ParserContext<'py, 'g, 's, 'r> {
     py: Python<'py>,
     graph: &'g mut RGraph,
+    current_segment: &'s mut SegmentId,
     results: &'r mut Vec<Option<EvalResult>>
 }
 
@@ -863,7 +908,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
             }),
             flops: Box::new(|shapes| {
                 if let [input_shape, weight_shape, _bias_shape] = shapes {
-                    3. * input_shape.iter().product::<usize>() as f64 * weight_shape[0] as f64
+                    3. * input_shape.iter().cloned().product::<Expression>() * weight_shape[0].clone()
                 } else {
                     unreachable!()
                 }
@@ -873,6 +918,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         ctx.graph.tensors.push(RTensor {
             producer: node_id,
             consumers: smallvec![],
+            segment_id: *ctx.current_segment,
             shape: output_shape.clone().into(),
             communicatable: true
         });
@@ -913,13 +959,14 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
             }),
             flops: Box::new(|shapes| {
                 let input_shape = &shapes[0];
-                3. * input_shape.iter().product::<usize>() as f64
+                3. * input_shape.iter().cloned().product::<Expression>()
             })
         });
 
         ctx.graph.tensors.push(RTensor {
             producer: node_id,
             consumers: smallvec![],
+            segment_id: *ctx.current_segment,
             shape: input_input_tensor.shape.clone(),
             communicatable: false
         });
@@ -959,13 +1006,14 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
             }),
             flops: Box::new(|input_shapes| {
                 let input_shape = &input_shapes[0];
-                input_shape.iter().product::<usize>() as f64
+                input_shape.iter().cloned().product::<Expression>()
             })
         });
 
         ctx.graph.tensors.push(RTensor {
             producer: node_id,
             consumers: smallvec![],
+            segment_id: *ctx.current_segment,
             shape: smallvec![],
             communicatable: false
         });
@@ -981,6 +1029,25 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         Ok(())
     }
 
+    parsing_handlers.insert(py.eval("models.new_segment", None, None)?.as_ptr() as _, &handle_new_segment);
+    fn handle_new_segment(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        assert!(py_node.getattr(ctx.py, "args")?.len(ctx.py)? == 1);
+
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_input_input_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 0)?;
+        let py_input_input_id = py_input_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?;
+        let input_input_tensor_id = ctx.results[py_input_input_id].as_ref().unwrap().as_tensor();
+
+        *ctx.current_segment += 1;
+
+        // Are there better ways to do it?
+        ctx.graph.tensors[input_input_tensor_id.0].communicatable = false;
+
+        ctx.results[py_id] = Some(EvalResult::Tensor(input_input_tensor_id));
+        Ok(())
+    }
+
     Ok(parsing_handlers)
 }
 
@@ -992,6 +1059,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
     let n_nodes = py_graph_module.getattr(py, "graph")?.getattr(py, "nodes")?.len(py)?;
 
     let mut results: Vec<Option<EvalResult>> = vec![None; n_nodes];
+    let mut current_segment = SegmentId(0);
 
     for py_node in py_graph_module.getattr(py, "graph")?.getattr(py, "nodes")?.iter(py)? {
         let py_node = py_node?;
@@ -1019,6 +1087,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                 graph.tensors.push(RTensor {
                     producer: node_id,
                     consumers: smallvec![],
+                    segment_id: current_segment,
                     shape: shape.into(),
                     communicatable: false
                 });
@@ -1046,6 +1115,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                 graph.tensors.push(RTensor {
                     producer: node_id,
                     consumers: smallvec![],
+                    segment_id: current_segment,
                     shape: shape.into(),
                     communicatable: false
                 });
@@ -1057,6 +1127,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                 let ctx = ParserContext {
                     py,
                     graph: &mut graph,
+                    current_segment: &mut current_segment,
                     results: &mut results
                 };
 
@@ -1067,6 +1138,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                 let ctx = ParserContext {
                     py,
                     graph: &mut graph,
+                    current_segment: &mut current_segment,
                     results: &mut results
                 };
 
@@ -1100,6 +1172,8 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
             _ => unreachable!()
         }
     }
+
+    graph.n_segments = current_segment.0 + 1;
 
     Ok(graph)
 }
@@ -1148,9 +1222,10 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         format!("placeholder_shard(\"{placeholder_name}\", dim={dim}])"),
                         Rc::new({
                             let placeholder_name = placeholder_name.clone();
+                            let segment_id = rgraph[tensor_id].segment_id;
                             move |ctx| {
                                 let py_complete_placeholder = ctx.fx_placeholder(&placeholder_name)?;
-                                let chunk_lengths = sharding_round(length, &ctx.sharding_ratios);
+                                let chunk_lengths = sharding_round(length, &ctx.sharding_ratios[segment_id.0]);
                                 let py_chunks = ctx.fx_call_method("split", (py_complete_placeholder, chunk_lengths, dim), None)?;
                                 let py_chunk = ctx.fx_call_function("operator.getitem", (py_chunks, ctx.rank), None)?;
                                 ctx.set_property_implementation(Property::gather(tensor_id, dim), py_chunk);
@@ -1180,9 +1255,9 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     }),
                     Rc::new({
                         move |ctx| {
-                            let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
+                            let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
                             let forward_profile = Default::default();
-                            let backward_profile = Profile { all_reduce: (size as f64).into(), ..Default::default() };
+                            let backward_profile = Profile { all_reduce: size, ..Default::default() };
                             (forward_profile, backward_profile)
                         }
                     })
@@ -1197,9 +1272,10 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         format!("get_attr_shard(\"{parameter_name}\", dim={dim}])"),
                         Rc::new({
                             let parameter_name = parameter_name.clone();
+                            let segment_id = rgraph[tensor_id].segment_id;
                             move |ctx| {
                                 let py_parameter = ctx.fx_get_attr(&parameter_name)?;
-                                ctx.shard_inplace(&parameter_name, &sharding_round(length, &ctx.sharding_ratios), dim)?;
+                                ctx.shard_inplace(&parameter_name, &sharding_round(length, &ctx.sharding_ratios[segment_id.0]), dim)?;
                                 ctx.set_property_implementation(Property::gather(tensor_id, dim), py_parameter);
                                 Ok(())
                             }
@@ -1242,16 +1318,19 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 smallvec![Property::gather(tensor_id, dim)],
                 smallvec![Property::identity(tensor_id)],
                 format!("all_gather(dim={dim})"),
-                Rc::new(move |ctx| {
-                    let py_input = ctx.get_property_implementation(Property::gather(tensor_id, dim));
-                    let py_result = ctx.fx_call_function("collectives.all_gather", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios), ctx.rank), None)?;
-                    ctx.set_property_implementation(Property::identity(tensor_id), py_result);
-                    Ok(())
+                Rc::new({
+                    let segment_id = tensor.segment_id;
+                    move |ctx| {
+                        let py_input = ctx.get_property_implementation(Property::gather(tensor_id, dim));
+                        let py_result = ctx.fx_call_function("collectives.all_gather", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
+                        ctx.set_property_implementation(Property::identity(tensor_id), py_result);
+                        Ok(())
+                    }
                 }),
                 Rc::new(move |ctx| {
-                    let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
-                    let forward_profile = Profile { all_gather: (size as f64).into(), ..Default::default() };
-                    let backward_profile = Profile { reduce_scatter: (size as f64).into(), ..Default::default() };
+                    let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
+                    let forward_profile = Profile { all_gather: size.clone(), ..Default::default() };
+                    let backward_profile = Profile { reduce_scatter: size.clone(), ..Default::default() };
                     (forward_profile, backward_profile)
                 })
             );
@@ -1260,11 +1339,14 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 smallvec![Property::identity(tensor_id)],
                 smallvec![Property::gather(tensor_id, dim)],
                 format!("dynamic_slice(dim={dim})"),
-                Rc::new(move |ctx| {
-                    let py_input = ctx.get_property_implementation(Property::identity(tensor_id));
-                    let py_result = ctx.fx_call_function("collectives.dynamic_slice", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios), ctx.rank), None)?;
-                    ctx.set_property_implementation(Property::gather(tensor_id, dim), py_result);
-                    Ok(())
+                Rc::new({
+                    let segment_id = tensor.segment_id;
+                    move |ctx| {
+                        let py_input = ctx.get_property_implementation(Property::identity(tensor_id));
+                        let py_result = ctx.fx_call_function("collectives.dynamic_slice", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
+                        ctx.set_property_implementation(Property::gather(tensor_id, dim), py_result);
+                        Ok(())
+                    }
                 }),
                 Rc::new(move |ctx| { Default::default() })
             );
@@ -1273,16 +1355,19 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 smallvec![Property::reduce(tensor_id)],
                 smallvec![Property::gather(tensor_id, dim)],
                 format!("reduce_scatter(dim={dim})"),
-                Rc::new(move |ctx| {
-                    let py_input = ctx.get_property_implementation(Property::reduce(tensor_id));
-                    let py_result = ctx.fx_call_function("collectives.reduce_scatter", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios), ctx.rank), None)?;
-                    ctx.set_property_implementation(Property::gather(tensor_id, dim), py_result);
-                    Ok(())
+                Rc::new({
+                    let segment_id = tensor.segment_id;
+                    move |ctx| {
+                        let py_input = ctx.get_property_implementation(Property::reduce(tensor_id));
+                        let py_result = ctx.fx_call_function("collectives.reduce_scatter", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
+                        ctx.set_property_implementation(Property::gather(tensor_id, dim), py_result);
+                        Ok(())
+                    }
                 }),
                 Rc::new(move |ctx| {
-                    let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
-                    let forward_profile = Profile { reduce_scatter: (size as f64).into(), ..Default::default() };
-                    let backward_profile = Profile { all_gather: (size as f64).into(), ..Default::default() };
+                    let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
+                    let forward_profile = Profile { reduce_scatter: size.clone(), ..Default::default() };
+                    let backward_profile = Profile { all_gather: size.clone(), ..Default::default() };
                     (forward_profile, backward_profile)
                 })
             );
@@ -1299,9 +1384,9 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 Ok(())
             }),
             Rc::new(move |ctx| {
-                let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
-                let forward_profile = Profile { all_reduce: (size as f64).into(), ..Default::default() };
-                let backward_profile = Profile { all_reduce: (size as f64).into(), ..Default::default() };
+                let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
+                let forward_profile = Profile { all_reduce: size.clone(), ..Default::default() };
+                let backward_profile = Profile { all_reduce: size.clone(), ..Default::default() };
                 (forward_profile, backward_profile)
             })
         );
@@ -1313,23 +1398,26 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         smallvec![Property::gather(tensor_id, i)],
                         smallvec![Property::gather(tensor_id, j)],
                         format!("all_to_all(cat={i}, split={j})"),
-                        Rc::new(move |ctx| {
-                            let py_input = ctx.get_property_implementation(Property::gather(tensor_id, i));
-                            let py_result = ctx.fx_call_function("collectives.all_to_all", (
-                                py_input,
-                                j,
-                                i,
-                                sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[j as usize], &ctx.sharding_ratios),
-                                sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[i as usize], &ctx.sharding_ratios),
-                                ctx.rank
-                            ), None)?;
-                            ctx.set_property_implementation(Property::gather(tensor_id, j), py_result);
-                            Ok(())
+                        Rc::new({
+                            let segment_id = tensor.segment_id;
+                            move |ctx| {
+                                let py_input = ctx.get_property_implementation(Property::gather(tensor_id, i));
+                                let py_result = ctx.fx_call_function("collectives.all_to_all", (
+                                    py_input,
+                                    j,
+                                    i,
+                                    sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[j as usize], &ctx.sharding_ratios[segment_id.0]),
+                                    sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[i as usize], &ctx.sharding_ratios[segment_id.0]),
+                                    ctx.rank
+                                ), None)?;
+                                ctx.set_property_implementation(Property::gather(tensor_id, j), py_result);
+                                Ok(())
+                            }
                         }),
                         Rc::new(move |ctx| {
-                            let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().product::<usize>();
-                            let forward_profile = Profile { all_to_all: (size as f64).into(), ..Default::default() };
-                            let backward_profile = Profile { all_to_all: (size as f64).into(), ..Default::default() };
+                            let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
+                            let forward_profile = Profile { all_to_all: size.clone(), ..Default::default() };
+                            let backward_profile = Profile { all_to_all: size.clone(), ..Default::default() };
                             (forward_profile, backward_profile)
                         })
                     );
@@ -1368,8 +1456,8 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
             Rc::new(move |ctx| {
                 let shapes: Vec<_> = pre_conditions.iter().map(|p| ctx.get_shape_by_property(*p)).collect();
                 let flops = (op.flops)(&shapes);
-                let forward_profile = Profile { flops: flops.into(), ..Default::default() };
-                let backward_profile = Profile { flops: (2. * flops).into(), ..Default::default() };
+                let forward_profile = Profile { flops: flops.clone(), ..Default::default() };
+                let backward_profile = Profile { flops: 2. * flops, ..Default::default() };
                 (forward_profile, backward_profile)
             })
         )
@@ -1711,6 +1799,12 @@ impl Mul<Expression> for f64 {
 
     fn mul(self, rhs: Expression) -> Self::Output {
         Expression::constant(self) * rhs
+    }
+}
+
+impl Product for Expression {
+    fn product<I: Iterator<Item=Self>>(iter: I) -> Self {
+        iter.fold(Expression::constant(1.), |acc, x| acc * x)
     }
 }
 

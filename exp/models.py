@@ -6,18 +6,20 @@ import torch.fx
 import torch.nn.functional as F
 
 class TMLP(torch.nn.Module):
-    def __init__(self, nhid=2048, nlayers=10):
+    def __init__(self, nhid=2048, nlayers=10, segmentation=True):
         super().__init__()
         modlist = []
         for _ in range(nlayers):
             modlist.append(torch.nn.Linear(nhid, nhid))
             modlist.append(torch.nn.Sigmoid())
         self.layers = torch.nn.ModuleList(modlist)
+        self.segmentation = segmentation
 
     def forward(self, x, y=None):
         for layer in self.layers:
             x = layer(x)
-            x = new_segment(x)
+            if self.segmentation:
+                x = new_segment(x)
         return torch.sum(x)
 
 class TMLP2(torch.nn.Module):
