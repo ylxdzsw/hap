@@ -835,6 +835,7 @@ pub struct Op {
     py_name: String,
     codegen: Box<dyn Fn(Python, &PyObject, &[PyObject]) -> PyResult<SVec<PyObject, 1>>>,
     flops: Box<dyn Fn(&[SymbolicShape]) -> Expression>,
+    info: BTreeMap<String, String>, // additional info for generating triples
 }
 
 impl Debug for Op {
@@ -869,6 +870,7 @@ impl EvalResult {
 
 fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'static dyn Fn(ParserContext, PyObject) -> PyResult<()>>> {
     let mut parsing_handlers: BTreeMap<*mut (), &'static dyn Fn(ParserContext, PyObject) -> PyResult<()>> = BTreeMap::new();
+    let tensor_class = py.eval("torch.Tensor", None, None)?;
 
     parsing_handlers.insert(py.eval("torch.nn.functional.linear", None, None)?.as_ptr() as _, &handle_linear);
     fn handle_linear(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
@@ -919,7 +921,8 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
                 } else {
                     unreachable!()
                 }
-            })
+            }),
+            info: BTreeMap::new()
         });
 
         ctx.graph.tensors.push(RTensor {
@@ -967,7 +970,8 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
             flops: Box::new(|shapes| {
                 let input_shape = &shapes[0];
                 3. * input_shape.iter().cloned().product::<Expression>()
-            })
+            }),
+            info: BTreeMap::new()
         });
 
         ctx.graph.tensors.push(RTensor {
@@ -1014,7 +1018,8 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
             flops: Box::new(|input_shapes| {
                 let input_shape = &input_shapes[0];
                 input_shape.iter().cloned().product::<Expression>()
-            })
+            }),
+            info: BTreeMap::new()
         });
 
         ctx.graph.tensors.push(RTensor {
@@ -1051,6 +1056,64 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         // TODO: somehow forbid sharding it, or we need to insert communication
 
         ctx.results[py_id] = Some(EvalResult::Tensor(input_input_tensor_id));
+        Ok(())
+    }
+
+    parsing_handlers.insert(tensor_class.getattr(py, "transpose")?.as_ptr() as _, &handle_transpose);
+    fn handle_transpose(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_input_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 0)?;
+        let mut dim0 = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 1)?.extract::<i32>(ctx.py)?;
+        let mut dim1 = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 2)?.extract::<i32>(ctx.py)?;
+
+        let input_tensor_id = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let input_shape = &ctx.graph[input_tensor_id].shape;
+
+        if dim0 < 0 {
+            dim0 += input_shape.len() as i32;
+        }
+        if dim1 < 0 {
+            dim1 += input_shape.len() as i32;
+        }
+
+        let mut output_shape = input_shape.clone();
+        output_shape.swap(dim0 as usize, dim1 as usize);
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let op = Rc::new(Op {
+            py_name: "torch.transpose".to_string(),
+            codegen: Box::new(move |py, graph, inputs| {
+                let input = &inputs[0];
+                let output = graph.call_method(py, "call_function", (py.eval("torch.transpose", None, None)?, (input, dim0, dim1)), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|input_shapes| {
+                let input_shape = &input_shapes[0];
+                input_shape.iter().cloned().product::<Expression>()
+            }),
+            info: [("dim0".to_string(), dim0.to_string()), ("dim1".to_string(), dim1.to_string())].into_iter().collect()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: output_shape,
+            communicatable: false
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[input_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+
         Ok(())
     }
 
@@ -1137,6 +1200,8 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                     results: &mut results
                 };
 
+                eprintln!("target_function: {:?}", py_node.getattr(py, "target"));
+
                 parsing_handlers[&(py_node.getattr(py, "target")?.as_ptr() as _)](ctx, py_node)?;
             },
 
@@ -1148,7 +1213,10 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                     results: &mut results
                 };
 
-                todo!()
+                let tensor_class = py.eval("torch.Tensor", None, None)?;
+                let target_method = py_node.getattr(py, "target")?;
+
+                parsing_handlers[&(tensor_class.getattr(ctx.py, target_method)?.as_ptr() as _)](ctx, py_node)?;
             }
 
             "output" => {
@@ -1544,6 +1612,48 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
             smallvec![Property::reduce(node.outputs[0])],
             op.clone(),
         );
+    });
+
+    // transpose
+    for_each_op!("torch.transpose", |node, op| {
+        eprintln!("here");
+
+        add_comp_triple(
+            smallvec![Property::identity(node.inputs[0])],
+            smallvec![Property::identity(node.outputs[0])],
+            op.clone(),
+        );
+
+        add_comp_triple(
+            smallvec![Property::reduce(node.inputs[0])],
+            smallvec![Property::reduce(node.outputs[0])],
+            op.clone(),
+        );
+
+        let dim0: Dimension = op.info["dim0"].parse().unwrap();
+        let dim1: Dimension = op.info["dim1"].parse().unwrap();
+
+        for dim in 0..rgraph[node.inputs[0]].n_dims() {
+            if dim == dim0 {
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], dim0)],
+                    smallvec![Property::gather(node.outputs[0], dim1)],
+                    op.clone(),
+                );
+            } else if dim == dim1 {
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], dim1)],
+                    smallvec![Property::gather(node.outputs[0], dim0)],
+                    op.clone(),
+                );
+            } else {
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], dim)],
+                    smallvec![Property::gather(node.outputs[0], dim)],
+                    op.clone(),
+                );
+            }
+        }
     });
 
     triples

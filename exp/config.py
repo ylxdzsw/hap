@@ -2,17 +2,18 @@ import os
 import sys
 import math
 
-rootpath = "/root/hidup"
+rootpath = "/root/hetspmd"
 # sys.path.insert(1, f"{rootpath}/spmd")
 
-model_name = "Tmlp"
+# model_name = "Tmlp"
+model_name = "Ttransformer"
 # model_name = "Rmoe"
 # model_name = "Rswitch"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
 
 world_size = 4
-nlayers = 8
+nlayers = 2
 n_expert = 2 * world_size
 batch_size = 32 * world_size
 seqlen = 128

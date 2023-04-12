@@ -35,13 +35,16 @@ class TMLP2(torch.nn.Module):
         return torch.sum(x)
 
 class TTransformer(torch.nn.Module):
-    def __init__(self, emsize=2048, nheads=4, nhid=2048, dropout=0.2, nlayers=2):
+    def __init__(self, emsize=2048, nheads=4, nhid=2048, dropout=0.2, nlayers=2, segmentation=True):
         super().__init__()
         self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nheads, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
+        self.segmentation = segmentation
 
     def forward(self, x, y=None):
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             x = layer(x)
+            if self.segmentation and i % 2 == 1:
+                x = new_segment(x)
         return torch.sum(x)
 
 class TMoE(torch.nn.Module):
