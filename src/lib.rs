@@ -866,6 +866,13 @@ impl EvalResult {
             EvalResult::Tuple(_) => panic!("not a tensor")
         }
     }
+
+    fn as_tuple(&self) -> &[RTensorId] {
+        match self {
+            EvalResult::Tensor(_) => panic!("not a tuple"),
+            EvalResult::Tuple(ids) => ids
+        }
+    }
 }
 
 fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'static dyn Fn(ParserContext, PyObject) -> PyResult<()>>> {
@@ -1116,6 +1123,146 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         Ok(())
     }
+
+    parsing_handlers.insert(py.eval("torch.nn.functional.multi_head_attention_forward", None, None)?.as_ptr() as _, &handle_multi_head_attention_forward);
+    #[allow(non_snake_case)]
+    fn handle_multi_head_attention_forward(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_query_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "query")?;
+        let py_key_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "key")?;
+        let py_value_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "value")?;
+        let py_in_proj_weight_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "in_proj_weight")?;
+        let py_in_proj_bias_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "in_proj_bias")?;
+        let py_out_proj_weight_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "out_proj_weight")?;
+        let py_out_proj_bias_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "out_proj_bias")?;
+        let py_attn_mask_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "attn_mask")?;
+
+
+        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "bias_k").map(|x| x.is_none(ctx.py)).unwrap_or(false));
+        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "bias_v").map(|x| x.is_none(ctx.py)).unwrap_or(false));
+        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "key_padding_mask").map(|x| x.is_none(ctx.py)).unwrap_or(false));
+        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "use_separate_proj_weight")?.extract::<bool>(ctx.py)? == false);
+        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "static_k").map(|x| x.is_none(ctx.py)).unwrap_or(false));
+        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "static_v").map(|x| x.is_none(ctx.py)).unwrap_or(false));
+
+        let query_tensor_id = ctx.results[py_query_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let key_tensor_id = ctx.results[py_key_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let value_tensor_id = ctx.results[py_value_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let in_proj_weight_tensor_id = ctx.results[py_in_proj_weight_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let in_proj_bias_tensor_id = ctx.results[py_in_proj_bias_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let out_proj_weight_tensor_id = ctx.results[py_out_proj_weight_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let out_proj_bias_tensor_id = ctx.results[py_out_proj_bias_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let attn_mask_tensor_id = if !py_attn_mask_node.is_none(ctx.py) {
+            Some(ctx.results[py_attn_mask_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor())
+        } else {
+            None
+        };
+
+        let query_tensor_shape = &ctx.graph[query_tensor_id].shape;
+        let key_tensor_shape = &ctx.graph[key_tensor_id].shape;
+
+        let L = query_tensor_shape[0];
+        let N = query_tensor_shape[1];
+        let E = query_tensor_shape[2];
+        let S = key_tensor_shape[0];
+
+        let has_attn_mask = !py_attn_mask_node.is_none(ctx.py);
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor1_id = RTensorId(ctx.graph.tensors.len());
+        let tensor2_id = tensor1_id + 1;
+
+        let op = Rc::new(Op {
+            py_name: "torch.nn.functional.multi_head_attention_forward".to_string(),
+            codegen: Box::new(|py, graph, inputs| {
+                let outputs = match inputs {
+                    [query, key, value, in_proj_weight, in_proj_bias, out_proj_weight, out_proj_bias] => {
+                        graph.call_method(py, "call_function", (py.eval("torch.nn.functional.multi_head_attention_forward", None, None)?, PyNone,
+                            py_dict!(py, query => query, key => key, value => value, in_proj_weight => in_proj_weight, in_proj_bias => in_proj_bias, out_proj_weight => out_proj_weight, out_proj_bias => out_proj_bias)
+                        ), None)?
+                    },
+                    [query, key, value, in_proj_weight, in_proj_bias, out_proj_weight, out_proj_bias, attn_mask] => {
+                        graph.call_method(py, "call_function", (py.eval("torch.nn.functional.multi_head_attention_forward", None, None)?, PyNone,
+                            py_dict!(py, query => query, key => key, value => value, in_proj_weight => in_proj_weight, in_proj_bias => in_proj_bias, out_proj_weight => out_proj_weight, out_proj_bias => out_proj_bias, attn_mask => attn_mask)
+                        ), None)?
+                    },
+                    _ => unreachable!()
+                };
+                Ok(smallvec![outputs.get_item(py, 0)?, outputs.get_item(py, 1)?])
+            }),
+            flops: Box::new(|shapes| {
+                if let [query_shape, key_shape, ..] = shapes {
+                    let L = &query_shape[0];
+                    let N = &query_shape[1];
+                    let E = &query_shape[2];
+                    let S = &key_shape[0];
+
+                    3. * L.clone() * N.clone() * E.clone() * S.clone() + 5. * L.clone() * S.clone() * N.clone() + 3. * L.clone() * N.clone() * E.clone() * S.clone()
+                } else {
+                    unreachable!()
+                }
+            }),
+            info: [("has_attn_mask".to_string(), has_attn_mask.to_string())].into_iter().collect(),
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: smallvec![L, N, E],
+            communicatable: true
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: smallvec![N, L, S],
+            communicatable: true
+        });
+
+        let mut input_node_ids = smallvec![query_tensor_id, key_tensor_id, value_tensor_id, in_proj_weight_tensor_id, in_proj_bias_tensor_id, out_proj_weight_tensor_id, out_proj_bias_tensor_id];
+        if has_attn_mask {
+            input_node_ids.push(attn_mask_tensor_id.unwrap());
+        }
+
+        ctx.graph.nodes.push(RNode {
+            inputs: input_node_ids,
+            outputs: smallvec![tensor1_id, tensor2_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[query_tensor_id].consumers.push(node_id);
+        ctx.graph[key_tensor_id].consumers.push(node_id);
+        ctx.graph[value_tensor_id].consumers.push(node_id);
+        ctx.graph[in_proj_weight_tensor_id].consumers.push(node_id);
+        ctx.graph[in_proj_bias_tensor_id].consumers.push(node_id);
+        ctx.graph[out_proj_weight_tensor_id].consumers.push(node_id);
+        ctx.graph[out_proj_bias_tensor_id].consumers.push(node_id);
+        if has_attn_mask {
+            ctx.graph[attn_mask_tensor_id.unwrap()].consumers.push(node_id);
+        }
+
+        ctx.results[py_id] = Some(EvalResult::Tuple(smallvec![tensor1_id, tensor2_id]));
+
+        Ok(())
+    }
+
+    parsing_handlers.insert(py.eval("operator.getitem", None, None)?.as_ptr() as _, &handle_getitem);
+    fn handle_getitem(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_input_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 0)?;
+        let n = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 1)?.extract::<usize>(ctx.py)?;
+
+        let input_tuple = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tuple();
+
+        ctx.results[py_id] = Some(EvalResult::Tensor(input_tuple[n]));
+
+        Ok(())
+    }
+
 
     Ok(parsing_handlers)
 }
@@ -1654,6 +1801,52 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 );
             }
         }
+    });
+
+    // attention
+    for_each_op!("torch.nn.functional.multi_head_attention_forward", |node, op| {
+        let _has_attn_mask: bool = op.info["has_attn_mask"].parse().unwrap();
+
+        add_comp_triple(
+            node.inputs.iter().map(|x| Property::identity(*x)).collect(),
+            node.outputs.iter().map(|x| Property::identity(*x)).collect(),
+            op.clone(),
+        );
+
+        let mut inputs = smallvec![
+            Property::gather(node.inputs[0], 1), // query
+            Property::gather(node.inputs[1], 1), // key
+            Property::gather(node.inputs[2], 1), // value
+        ];
+
+        for x in 3..node.inputs.len() {
+            inputs.push(Property::identity(node.inputs[x]));
+        }
+
+        add_comp_triple(
+            inputs,
+            smallvec![Property::gather(node.outputs[0], 1), Property::gather(node.outputs[0], 0)],
+            op.clone(),
+        );
+
+        let mut inputs = smallvec![
+            Property::gather(node.inputs[0], 2), // query
+            Property::gather(node.inputs[1], 2), // key
+            Property::gather(node.inputs[2], 2), // value
+            Property::gather(node.inputs[3], 0), // in_proj_weight
+            Property::gather(node.inputs[4], 0), // in_proj_bias
+            Property::gather(node.inputs[5], 1), // out_proj_weight
+        ];
+
+        for x in 6..node.inputs.len() {
+            inputs.push(Property::identity(node.inputs[x]));
+        }
+
+        add_comp_triple(
+            inputs,
+            smallvec![Property::reduce(node.outputs[0]), Property::reduce(node.outputs[0])],
+            op.clone(),
+        )
     });
 
     triples
