@@ -1366,6 +1366,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         let b_tensor_id = ctx.results[py_b_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
 
         assert!(ctx.graph[a_tensor_id].shape == ctx.graph[b_tensor_id].shape);
+        assert!(a_tensor_id != b_tensor_id);
 
         let node_id = RNodeId(ctx.graph.nodes.len());
         let tensor_id = RTensorId(ctx.graph.tensors.len());
@@ -1405,7 +1406,50 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         Ok(())
     }
 
+    parsing_handlers.insert(py.eval("torch.nn.functional.layer_norm", None, None)?.as_ptr() as _, &handle_layer_norm);
+    fn handle_layer_norm(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
 
+        let py_input_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "input")?;
+        let normalized_shape: Vec<usize> = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "normalized_shape")?.extract(ctx.py)?;
+        let input_tensor_id = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let normalized_shape_copy = normalized_shape.clone();
+        let op = Rc::new(Op {
+            py_name: "torch.nn.functional.layer_norm".to_string(),
+            codegen: Box::new(move |py, graph, inputs| {
+                let input = &inputs[0];
+                let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.layer_norm", None, None)?, (input, normalized_shape_copy.clone())), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                let input_shape = &shapes[0];
+                10. * input_shape.iter().cloned().product::<Expression>()
+            }),
+            info: [("normalized_dims".to_string(), normalized_shape.len().to_string())].into_iter().collect()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: ctx.graph[input_tensor_id].shape.clone(),
+            communicatable: true
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[input_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
 
     Ok(parsing_handlers)
 }
@@ -1489,8 +1533,6 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                     current_segment: &mut current_segment,
                     results: &mut results
                 };
-
-                eprintln!("target_function: {:?}", py_node.getattr(py, "target"));
 
                 parsing_handlers[&(py_node.getattr(py, "target")?.as_ptr() as _)](ctx, py_node)?;
             },
@@ -1906,8 +1948,6 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
 
     // transpose
     for_each_op!("torch.transpose", |node, op| {
-        eprintln!("here");
-
         add_comp_triple(
             smallvec![Property::identity(node.inputs[0])],
             smallvec![Property::identity(node.outputs[0])],
@@ -2048,6 +2088,23 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
         }
     });
 
+    for_each_op!("torch.nn.functional.layer_norm", |node, op| {
+        let normalized_dims: Dimension = op.info["normalized_dims"].parse().unwrap();
+
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        for dim in 0..rgraph[node.inputs[0]].n_dims() - normalized_dims {
+            add_comp_triple(
+                smallvec![Property::gather(node.inputs[0], dim), Property::gather(node.inputs[0], dim)],
+                smallvec![Property::gather(node.outputs[0], dim)],
+                op.clone(),
+            );
+        }
+    });
 
 
     triples

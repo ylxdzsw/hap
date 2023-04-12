@@ -43,7 +43,7 @@ class TTransformer(torch.nn.Module):
     def forward(self, x, y=None):
         for i, layer in enumerate(self.layers):
             x = layer(x)
-            if self.segmentation and i % 2 == 1:
+            if self.segmentation:
                 x = new_segment(x)
         return torch.sum(x)
 
