@@ -1263,6 +1263,149 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         Ok(())
     }
 
+    parsing_handlers.insert(py.eval("torch.nn.functional.relu", None, None)?.as_ptr() as _, &handle_relu);
+    fn handle_relu(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "inplace")?.extract::<bool>(ctx.py)? == false);
+
+        let py_input_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "input")?;
+        let input_tensor_id = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let op = Rc::new(Op {
+            py_name: "torch.relu".to_string(),
+            codegen: Box::new(|py, graph, inputs| {
+                let input = &inputs[0];
+                let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.relu", None, None)?, (input, )), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                let input_shape = &shapes[0];
+                3. * input_shape.iter().cloned().product::<Expression>()
+            }),
+            info: BTreeMap::new()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: ctx.graph[input_tensor_id].shape.clone(),
+            communicatable: false
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[input_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
+
+    parsing_handlers.insert(py.eval("torch.nn.functional.dropout", None, None)?.as_ptr() as _, &handle_dropout);
+    fn handle_dropout(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "inplace")?.extract::<bool>(ctx.py)? == false);
+
+        let py_input_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "input")?;
+        let input_tensor_id = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        let p = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "p")?.extract::<f64>(ctx.py)?;
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let op = Rc::new(Op {
+            py_name: "torch.nn.functional.dropout".to_string(),
+            codegen: Box::new(move |py, graph, inputs| {
+                let input = &inputs[0];
+                let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.dropout", None, None)?, (input, p)), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                let input_shape = &shapes[0];
+                3. * input_shape.iter().cloned().product::<Expression>()
+            }),
+            info: BTreeMap::new()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: ctx.graph[input_tensor_id].shape.clone(),
+            communicatable: false
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[input_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
+
+    parsing_handlers.insert(py.eval("operator.add", None, None)?.as_ptr() as _, &handle_add);
+    fn handle_add(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_a_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 0)?;
+        let py_b_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 1)?;
+
+        let a_tensor_id = ctx.results[py_a_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let b_tensor_id = ctx.results[py_b_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        assert!(ctx.graph[a_tensor_id].shape == ctx.graph[b_tensor_id].shape);
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let op = Rc::new(Op {
+            py_name: "operator.add".to_string(),
+            codegen: Box::new(|py, graph, inputs| {
+                let a = &inputs[0];
+                let b = &inputs[1];
+                let output = graph.call_method(py, "call_function", (py.eval("operator.add", None, None)?, (a, b)), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                let input_shape = &shapes[0];
+                input_shape.iter().cloned().product::<Expression>()
+            }),
+            info: BTreeMap::new()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: ctx.graph[a_tensor_id].shape.clone(),
+            communicatable: false
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![a_tensor_id, b_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[a_tensor_id].consumers.push(node_id);
+        ctx.graph[b_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
+
+
 
     Ok(parsing_handlers)
 }
@@ -1848,6 +1991,64 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
             op.clone(),
         )
     });
+
+    // ReLU
+    for_each_op!("torch.nn.functional.relu", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        for dim in 0..rgraph[node.inputs[0]].n_dims() {
+            add_comp_triple(
+                smallvec![Property::gather(node.inputs[0], dim)],
+                smallvec![Property::gather(node.outputs[0], dim)],
+                op.clone(),
+            );
+        }
+    });
+
+    // Dropout
+    for_each_op!("torch.nn.functional.dropout", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        for dim in 0..rgraph[node.inputs[0]].n_dims() {
+            add_comp_triple(
+                smallvec![Property::gather(node.inputs[0], dim)],
+                smallvec![Property::gather(node.outputs[0], dim)],
+                op.clone(),
+            );
+        }
+    });
+
+    for_each_op!("operator.add", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::reduce).collect(),
+            node.outputs.iter().cloned().map(Property::reduce).collect(),
+            op.clone(),
+        );
+
+        for dim in 0..rgraph[node.inputs[0]].n_dims() {
+            add_comp_triple(
+                smallvec![Property::gather(node.inputs[0], dim), Property::gather(node.inputs[0], dim)],
+                smallvec![Property::gather(node.outputs[0], dim)],
+                op.clone(),
+            );
+        }
+    });
+
+
 
     triples
 }
