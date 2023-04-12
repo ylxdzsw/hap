@@ -25,6 +25,7 @@ static CTRLC_RECEIVED: AtomicBool = AtomicBool::new(false);
 static init_script: &str = r#"
 import collectives
 import operator
+import models
 
 def get_shape_of_param_or_buffer(graph_module, node):
     try:
@@ -121,6 +122,12 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         let best_program = a_star(&a_star_context, &default_properties, &profiler);
         eprintln!("===== Result =====\n\n");
         best_program.show(&triple_set);
+
+        sharding_ratio_optimization(&best_program, &triple_set, &sharding_ratios, &profiler);
+
+
+
+
 
         let mut codegen_context = CodegenContext::new(
             py, py_graph_module, &rgraph, get_config!("rank"),
@@ -1031,18 +1038,17 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
     parsing_handlers.insert(py.eval("models.new_segment", None, None)?.as_ptr() as _, &handle_new_segment);
     fn handle_new_segment(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
-        assert!(py_node.getattr(ctx.py, "args")?.len(ctx.py)? == 1);
+        assert!(py_node.getattr(ctx.py, "args")?.len(ctx.py)? == 0);
 
         let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
 
-        let py_input_input_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 0)?;
+        let py_input_input_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "x")?;
         let py_input_input_id = py_input_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?;
         let input_input_tensor_id = ctx.results[py_input_input_id].as_ref().unwrap().as_tensor();
 
         *ctx.current_segment += 1;
 
-        // Are there better ways to do it?
-        ctx.graph.tensors[input_input_tensor_id.0].communicatable = false;
+        // TODO: somehow forbid sharding it, or we need to insert communication
 
         ctx.results[py_id] = Some(EvalResult::Tensor(input_input_tensor_id));
         Ok(())
@@ -1328,9 +1334,9 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     }
                 }),
                 Rc::new(move |ctx| {
-                    let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
-                    let forward_profile = Profile { all_gather: size.clone(), ..Default::default() };
-                    let backward_profile = Profile { reduce_scatter: size.clone(), ..Default::default() };
+                    let size = ctx.get_shape_by_property(Property::gather(tensor_id, dim)).iter().cloned().product::<Expression>();
+                    let forward_profile = Profile { all_gather: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
+                    let backward_profile = Profile { reduce_scatter: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
                     (forward_profile, backward_profile)
                 })
             );
@@ -1365,9 +1371,9 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     }
                 }),
                 Rc::new(move |ctx| {
-                    let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
-                    let forward_profile = Profile { reduce_scatter: size.clone(), ..Default::default() };
-                    let backward_profile = Profile { all_gather: size.clone(), ..Default::default() };
+                    let size = ctx.get_shape_by_property(Property::gather(tensor_id, dim)).iter().cloned().product::<Expression>();
+                    let forward_profile = Profile { reduce_scatter: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
+                    let backward_profile = Profile { all_gather: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
                     (forward_profile, backward_profile)
                 })
             );
@@ -1415,9 +1421,9 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                             }
                         }),
                         Rc::new(move |ctx| {
-                            let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
-                            let forward_profile = Profile { all_to_all: size.clone(), ..Default::default() };
-                            let backward_profile = Profile { all_to_all: size.clone(), ..Default::default() };
+                            let size = ctx.get_shape_by_property(Property::gather(tensor_id, i)).iter().cloned().product::<Expression>();
+                            let forward_profile = Profile { all_to_all: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
+                            let backward_profile = Profile { all_to_all: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
                             (forward_profile, backward_profile)
                         })
                     );
@@ -1774,14 +1780,19 @@ impl Mul for Expression {
 
     fn mul(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
-            (Expression::Symbol(symbol_id, coefficient), Expression::Constant(constant)) => {
-                Expression::Symbol(symbol_id, coefficient * constant)
-            }
             (Expression::Constant(lhs_constant), Expression::Constant(rhs_constant)) => {
                 Expression::Constant(lhs_constant * rhs_constant)
             }
+            (Expression::Constant(constant), Expression::Symbol(symbol_id, coefficient)) => {
+                Expression::Symbol(symbol_id, coefficient * constant)
+            }
+            (Expression::Constant(lhs_constant), Expression::Linear(coefficients, rhs_constant)) => {
+                Expression::Linear(coefficients.into_iter().map(|x| x * lhs_constant).collect(), rhs_constant * lhs_constant)
+            }
 
-            _ => panic!("quadratic expression")
+            (lhs @ _, rhs @ Expression::Constant(_)) => rhs * lhs,
+
+            x @ _ => panic!("quadratic expression: {:?}", x)
         }
     }
 }
@@ -1825,5 +1836,97 @@ impl Default for Expression {
 impl<T: Into<f64>> From<T> for Expression {
     fn from(value: T) -> Self {
         Expression::Constant(value.into())
+    }
+}
+
+fn sharding_ratio_optimization(program: &Program, triple_set: &IndexedHoareTripleSet, sharding_ratios: &[Vec<SymbolId>], profiler: &Profiler) {
+    let mut model = coin_cbc::Model::default();
+
+    model.set_parameter("slogLevel", "0");
+    model.set_parameter("logLevel", "0");
+    model.add_integer(); // CBC's bug: the parameters are not passed to the solver if the problem is pure LP
+
+    model.set_obj_sense(coin_cbc::Sense::Minimize);
+
+    let n_segments = profiler.rgraph.n_segments;
+    let n_devices = profiler.cluster_info.n_devices();
+    let n_stages = program.triple_ids.len();
+
+    // let mut sharding_ratios_obj_coeff = vec![0.; n_segments * n_devices];
+    let mut sharding_ratios_cbc: Vec<_> = (0..n_segments * n_devices).into_iter().map(|_| {
+        let x = model.add_col();
+        // model.set_continuous(x);
+        model.set_col_lower(x, 0.);
+        model.set_col_upper(x, 1.);
+        model.set_obj_coeff(x, 0.);
+        x
+    }).collect();
+
+    for triple_id in program.triple_ids.iter() {
+        let triple = &triple_set.triples[triple_id.0];
+        let (computation_times, communication_times) = triple.get_cost_symbolic(profiler, &sharding_ratios.iter().map(|s| {
+            s.iter().map(|d| Expression::symbol(*d)).collect()
+        }).collect::<Vec<_>>());
+
+        let computation_max = model.add_col();
+        model.set_col_lower(computation_max, 0.);
+        model.set_col_upper(computation_max, 1.);
+        model.set_obj_coeff(computation_max, 1.);
+        for computation_time in computation_times {
+            let row = model.add_row();
+            model.set_row_upper(row, 0.);
+            model.set_weight(row, computation_max, -1.);
+
+            if let Expression::Linear(coefficients, constant) = computation_time.to_linear() {
+                for (i, coeff) in coefficients.into_iter().enumerate() {
+                    model.set_weight(row, sharding_ratios_cbc[i], coeff);
+                }
+            } else {
+                unreachable!()
+            }
+        }
+
+        let communication_max = model.add_col();
+        model.set_col_lower(communication_max, 0.);
+        model.set_col_upper(communication_max, 1.);
+        model.set_obj_coeff(communication_max, 1.);
+        for communication_time in communication_times {
+            let row = model.add_row();
+            model.set_row_upper(row, 0.);
+            model.set_weight(row, communication_max, -1.);
+
+            if let Expression::Linear(coefficients, constant) = communication_time.to_linear() {
+                for (i, coeff) in coefficients.into_iter().enumerate() {
+                    model.set_weight(row, sharding_ratios_cbc[i], coeff);
+                }
+            } else {
+                unreachable!()
+            }
+        }
+
+    }
+
+    for s in 0..n_segments {
+        let row = model.add_row();
+        model.set_row_lower(row, 1.);
+        model.set_row_upper(row, 1.);
+        for d in 0..n_devices {
+            model.set_weight(row, sharding_ratios_cbc[sharding_ratios[s][d].0], 1.);
+        }
+    }
+
+    // model.to_raw().write_mps(&std::ffi::CString::new("sharding_ratio").unwrap());
+
+    let sol = model.solve();
+    eprintln!("=== sharding ratios ===");
+    for i in 0..n_segments {
+        eprint!("[");
+        for j in 0..n_devices {
+            if j > 0 {
+                eprint!(" ");
+            }
+            eprint!("{}", sol.col(sharding_ratios_cbc[sharding_ratios[i][j].0]));
+        }
+        eprintln!("]");
     }
 }

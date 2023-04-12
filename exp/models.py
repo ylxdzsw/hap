@@ -16,9 +16,9 @@ class TMLP(torch.nn.Module):
         self.segmentation = segmentation
 
     def forward(self, x, y=None):
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             x = layer(x)
-            if self.segmentation:
+            if self.segmentation and i % 2 == 1:
                 x = new_segment(x)
         return torch.sum(x)
 
@@ -463,5 +463,6 @@ class PatchEmbed(torch.nn.Module):
         return x
 
 # TODO: make it accepting multiple arguments?
+@torch.fx.wrap
 def new_segment(x):
     return x
