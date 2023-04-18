@@ -24,7 +24,12 @@ def run(global_rank, local_rank):
 
     dgraph = hetspmd.main(model, {
         "input_shape": config.input_shape(),
-        "device_flops": [config.profiler_data["device_flops"]] * 4,
+        "device_flops": [
+            config.profiler_data["device_flops"],
+            config.profiler_data["device_flops"],
+            config.profiler_data["device_flops"] * 0.7,
+            config.profiler_data["device_flops"] * 0.7,
+        ],
         "all_reduce_bandwidth": config.profiler_data["all_reduce"],
         "all_gather_bandwidth": config.profiler_data["all_gather"],
         "reduce_scatter_bandwidth": config.profiler_data["reduce_scatter"],
@@ -52,8 +57,12 @@ def run(global_rank, local_rank):
         with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
             loss = dmodel(x)
 
+        print("\n\n\nbefore\n\n\n")
         aggregated_loss = loss.detach().clone()
+        print("\n\n\nmiddle\n\n\n")
         dist.reduce(aggregated_loss, 0)
+        print("\n\n\nafter\n\n\n")
+
         if global_rank == 0:
             total_loss += aggregated_loss.cpu().numpy() / config.batch_size / config.seqlen
             if iter % config.log_iter == 0:

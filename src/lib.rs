@@ -126,9 +126,6 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         sharding_ratio_optimization(&best_program, &triple_set, &sharding_ratios, &profiler);
 
 
-
-
-
         let mut codegen_context = CodegenContext::new(
             py, py_graph_module, &rgraph, get_config!("rank"),
             sharding_ratios.iter().map(|s| {
@@ -657,7 +654,7 @@ fn a_star(ctx: &AStarContext, initial_properties: &[Property], profiler: &Profil
         }
 
         // if ticker.iter_count % 5000 == 0 {
-        //     eprintln!("{program}");
+        //     program.show(&ctx.triple_set);
         // }
 
         if program.is_complete() {
@@ -1138,6 +1135,9 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         let py_out_proj_bias_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "out_proj_bias")?;
         let py_attn_mask_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "attn_mask")?;
 
+        let dropout_p = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "dropout_p")?.extract::<f64>(ctx.py)?;
+        let num_heads = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "num_heads")?.extract::<i32>(ctx.py)?;
+        let embed_dim_to_check = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "embed_dim_to_check")?.extract::<i32>(ctx.py)?;
 
         assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "bias_k").map(|x| x.is_none(ctx.py)).unwrap_or(false));
         assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "bias_v").map(|x| x.is_none(ctx.py)).unwrap_or(false));
@@ -1145,6 +1145,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "use_separate_proj_weight")?.extract::<bool>(ctx.py)? == false);
         assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "static_k").map(|x| x.is_none(ctx.py)).unwrap_or(false));
         assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "static_v").map(|x| x.is_none(ctx.py)).unwrap_or(false));
+        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "add_zero_attn")?.extract::<bool>(ctx.py)? == false);
 
         let query_tensor_id = ctx.results[py_query_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
         let key_tensor_id = ctx.results[py_key_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
@@ -1175,21 +1176,37 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.multi_head_attention_forward".to_string(),
-            codegen: Box::new(|py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs| {
                 let outputs = match inputs {
                     [query, key, value, in_proj_weight, in_proj_bias, out_proj_weight, out_proj_bias] => {
                         graph.call_method(py, "call_function", (py.eval("torch.nn.functional.multi_head_attention_forward", None, None)?, PyNone,
-                            py_dict!(py, query => query, key => key, value => value, in_proj_weight => in_proj_weight, in_proj_bias => in_proj_bias, out_proj_weight => out_proj_weight, out_proj_bias => out_proj_bias)
+                            py_dict!(py,
+                                query => query, key => key, value => value,
+                                in_proj_weight => in_proj_weight, in_proj_bias => in_proj_bias,
+                                out_proj_weight => out_proj_weight, out_proj_bias => out_proj_bias,
+                                embed_dim_to_check => embed_dim_to_check, num_heads => num_heads,
+                                bias_k => PyNone, bias_v => PyNone, add_zero_attn => false, dropout_p => dropout_p
+                            )
                         ), None)?
                     },
                     [query, key, value, in_proj_weight, in_proj_bias, out_proj_weight, out_proj_bias, attn_mask] => {
                         graph.call_method(py, "call_function", (py.eval("torch.nn.functional.multi_head_attention_forward", None, None)?, PyNone,
-                            py_dict!(py, query => query, key => key, value => value, in_proj_weight => in_proj_weight, in_proj_bias => in_proj_bias, out_proj_weight => out_proj_weight, out_proj_bias => out_proj_bias, attn_mask => attn_mask)
+                            py_dict!(py,
+                                query => query, key => key, value => value,
+                                in_proj_weight => in_proj_weight, in_proj_bias => in_proj_bias,
+                                out_proj_weight => out_proj_weight, out_proj_bias => out_proj_bias,
+                                attn_mask => attn_mask,
+                                embed_dim_to_check => embed_dim_to_check, num_heads => num_heads,
+                                bias_k => PyNone, bias_v => PyNone, add_zero_attn => false, dropout_p => dropout_p
+                            )
                         ), None)?
                     },
                     _ => unreachable!()
                 };
-                Ok(smallvec![outputs.get_item(py, 0)?, outputs.get_item(py, 1)?])
+
+                let output1 = graph.call_method(py, "call_function", (py.eval("operator.getitem", None, None)?, (&outputs, 0), PyNone), None)?;
+                let output2 = graph.call_method(py, "call_function", (py.eval("operator.getitem", None, None)?, (&outputs, 1), PyNone), None)?;
+                Ok(smallvec![output1, output2])
             }),
             flops: Box::new(|shapes| {
                 if let [query_shape, key_shape, ..] = shapes {
@@ -1276,7 +1293,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         let tensor_id = RTensorId(ctx.graph.tensors.len());
 
         let op = Rc::new(Op {
-            py_name: "torch.relu".to_string(),
+            py_name: "torch.nn.functional.relu".to_string(),
             codegen: Box::new(|py, graph, inputs| {
                 let input = &inputs[0];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.relu", None, None)?, (input, )), None)?;
@@ -1391,7 +1408,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
             consumers: smallvec![],
             segment_id: *ctx.current_segment,
             shape: ctx.graph[a_tensor_id].shape.clone(),
-            communicatable: false
+            communicatable: true
         });
 
         ctx.graph.nodes.push(RNode {
@@ -2008,7 +2025,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
 
         add_comp_triple(
             inputs,
-            smallvec![Property::gather(node.outputs[0], 1), Property::gather(node.outputs[0], 0)],
+            smallvec![Property::gather(node.outputs[0], 1), Property::gather(node.outputs[1], 0)],
             op.clone(),
         );
 
@@ -2027,7 +2044,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
 
         add_comp_triple(
             inputs,
-            smallvec![Property::reduce(node.outputs[0]), Property::reduce(node.outputs[0])],
+            smallvec![Property::reduce(node.outputs[0]), Property::reduce(node.outputs[1])],
             op.clone(),
         )
     });
@@ -2066,6 +2083,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
         }
     });
 
+    // Add
     for_each_op!("operator.add", |node, op| {
         add_comp_triple(
             node.inputs.iter().cloned().map(Property::identity).collect(),
@@ -2081,13 +2099,14 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
 
         for dim in 0..rgraph[node.inputs[0]].n_dims() {
             add_comp_triple(
-                smallvec![Property::gather(node.inputs[0], dim), Property::gather(node.inputs[0], dim)],
+                smallvec![Property::gather(node.inputs[0], dim), Property::gather(node.inputs[1], dim)],
                 smallvec![Property::gather(node.outputs[0], dim)],
                 op.clone(),
             );
         }
     });
 
+    // Layer Norm
     for_each_op!("torch.nn.functional.layer_norm", |node, op| {
         let normalized_dims: Dimension = op.info["normalized_dims"].parse().unwrap();
 
@@ -2099,7 +2118,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
 
         for dim in 0..rgraph[node.inputs[0]].n_dims() - normalized_dims {
             add_comp_triple(
-                smallvec![Property::gather(node.inputs[0], dim), Property::gather(node.inputs[0], dim)],
+                smallvec![Property::gather(node.inputs[0], dim)],
                 smallvec![Property::gather(node.outputs[0], dim)],
                 op.clone(),
             );
