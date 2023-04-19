@@ -5,8 +5,8 @@ import math
 rootpath = "/root/hetspmd"
 # sys.path.insert(1, f"{rootpath}/spmd")
 
-model_name = "Tmlp"
-# model_name = "Ttransformer"
+# model_name = "Tmlp"
+model_name = "Ttransformer"
 # model_name = "Rmoe"
 # model_name = "Rswitch"
 # model_name = "Vmoe"
@@ -15,7 +15,7 @@ model_name = "Tmlp"
 world_size = 4
 nlayers = 4
 n_expert = 2 * world_size
-batch_size = 32 * world_size
+batch_size = 64 * world_size
 seqlen = 128
 if model_name.startswith('V'):
     seqlen = 64
@@ -32,9 +32,9 @@ nheads = 12
 segmentation = True
 # segmentation = False
 
-# master_addr = "10.28.1.26"
-master_addr = "127.0.0.1"
-master_port = 39262
+master_addr = "10.28.1.30"
+# master_addr = "127.0.0.1"
+master_port = 39263
 
 trace = True
 # trace = False

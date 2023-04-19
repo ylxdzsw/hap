@@ -19,8 +19,8 @@ dgraph = hetspmd.main(model, {
     "device_flops": [
         config.profiler_data["device_flops"],
         config.profiler_data["device_flops"],
-        config.profiler_data["device_flops"] * 0.7,
-        config.profiler_data["device_flops"] * 0.7,
+        config.profiler_data["device_flops"] * 0.5,
+        config.profiler_data["device_flops"] * 0.5,
     ],
     "all_reduce_bandwidth": config.profiler_data["all_reduce"],
     "all_gather_bandwidth": config.profiler_data["all_gather"],

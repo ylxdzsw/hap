@@ -1047,11 +1047,14 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
     parsing_handlers.insert(py.eval("models.new_segment", None, None)?.as_ptr() as _, &handle_new_segment);
     fn handle_new_segment(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
-        assert!(py_node.getattr(ctx.py, "args")?.len(ctx.py)? == 0);
-
         let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
 
-        let py_input_input_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "x")?;
+        let py_input_input_node = if (py_node.getattr(ctx.py, "args")?.len(ctx.py)? == 0) {
+            py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "x")?
+        } else {
+            py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 0)?
+        };
+
         let py_input_input_id = py_input_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?;
         let input_input_tensor_id = ctx.results[py_input_input_id].as_ref().unwrap().as_tensor();
 

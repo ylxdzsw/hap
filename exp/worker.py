@@ -27,8 +27,8 @@ def run(global_rank, local_rank):
         "device_flops": [
             config.profiler_data["device_flops"],
             config.profiler_data["device_flops"],
-            config.profiler_data["device_flops"] * 0.7,
-            config.profiler_data["device_flops"] * 0.7,
+            config.profiler_data["device_flops"] * 0.3,
+            config.profiler_data["device_flops"] * 0.3,
         ],
         "all_reduce_bandwidth": config.profiler_data["all_reduce"],
         "all_gather_bandwidth": config.profiler_data["all_gather"],
@@ -57,11 +57,8 @@ def run(global_rank, local_rank):
         with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
             loss = dmodel(x)
 
-        print("\n\n\nbefore\n\n\n")
         aggregated_loss = loss.detach().clone()
-        print("\n\n\nmiddle\n\n\n")
         dist.reduce(aggregated_loss, 0)
-        print("\n\n\nafter\n\n\n")
 
         if global_rank == 0:
             total_loss += aggregated_loss.cpu().numpy() / config.batch_size / config.seqlen
@@ -137,9 +134,9 @@ def run(global_rank, local_rank):
 if __name__ == '__main__':
     ranks = [ int(x) for x in sys.argv[1].split(',') ]
 
-    if torch.cuda.device_count() != len(ranks):
-        print("forget to set CUDA_VISIBLE_DEVICES")
-        raise SystemExit
+    # if torch.cuda.device_count() != len(ranks):
+    #     print("forget to set CUDA_VISIBLE_DEVICES")
+    #     raise SystemExit
 
     import os
     os.environ['MASTER_ADDR'] = str(config.master_addr)

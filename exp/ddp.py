@@ -87,9 +87,9 @@ def run(global_rank, local_rank):
 if __name__ == '__main__':
     ranks = [ int(x) for x in sys.argv[1].split(',') ]
 
-    if torch.cuda.device_count() != len(ranks):
-        print("forget to set CUDA_VISIBLE_DEVICES")
-        raise SystemExit
+    # if torch.cuda.device_count() != len(ranks):
+    #     print("forget to set CUDA_VISIBLE_DEVICES")
+    #     raise SystemExit
 
     import os
     os.environ['MASTER_ADDR'] = str(config.master_addr)
