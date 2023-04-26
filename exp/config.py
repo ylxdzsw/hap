@@ -6,11 +6,12 @@ rootpath = "/root/hetspmd"
 # sys.path.insert(1, f"{rootpath}/spmd")
 
 # model_name = "Tmlp"
-model_name = "Ttransformer"
+# model_name = "Ttransformer"
 # model_name = "Rmoe"
 # model_name = "Rswitch"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
+model_name = "Vvgg"
 
 world_size = 4
 nlayers = 4
@@ -32,12 +33,12 @@ nheads = 12
 segmentation = True
 # segmentation = False
 
-master_addr = "10.28.1.30"
-# master_addr = "127.0.0.1"
+# master_addr = "10.28.1.30"
+master_addr = "127.0.0.1"
 master_port = 39263
 
-trace = True
-# trace = False
+# trace = True
+trace = False
 
 # use_hints = True
 use_hints = False
@@ -98,6 +99,9 @@ def get_model(seed=None):
     if model_name == 'Vswitch':
         nclasses, *_ = get_data()
         return models.VSwitch(nclasses=nclasses, seqlen=seqlen, emsize=emsize, nheads=nheads, nhid=nhid, dropout=dropout, n_expert=n_expert, capacity=capacity, nlayers=nlayers, segmentation=segmentation)
+    if model_name == 'Vvgg':
+        nclasses, *_ = get_data()
+        return models.VVGG(nclasses=nclasses, dropout=dropout, segmentation=segmentation)
 
 def get_data():
     if model_name.startswith('R'):
@@ -144,8 +148,8 @@ def cifar10():
         loader = torch.utils.data.DataLoader(data, batch_size=batch_size, drop_last=True)
         while True:
             yield from iter(loader)
-    train_data = torchvision.datasets.CIFAR10(f"{rootpath}/cifar10", train=True, transform=torchvision.transforms.ToTensor())
-    test_data = torchvision.datasets.CIFAR10(f"{rootpath}/cifar10", train=False, transform=torchvision.transforms.ToTensor())
+    train_data = torchvision.datasets.CIFAR10(f"{rootpath}/cifar10", train=True, transform=torchvision.transforms.ToTensor(), download=True)
+    test_data = torchvision.datasets.CIFAR10(f"{rootpath}/cifar10", train=False, transform=torchvision.transforms.ToTensor(), download=True)
     return 10, it(train_data), it(test_data)
 
 def input_shape():

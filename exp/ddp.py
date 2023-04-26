@@ -33,7 +33,7 @@ def run(global_rank, local_rank):
         y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
 
         with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
-            loss = dmodel(x) * config.world_size # DDP averages the loss
+            loss = dmodel(x, y) * config.world_size # DDP averages the loss
 
         aggregated_loss = loss.detach().clone()
         dist.reduce(aggregated_loss, 0)
@@ -71,7 +71,7 @@ def run(global_rank, local_rank):
         for _ in range(15):
             with record_function("forward"):
                 with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
-                    loss = dmodel(x)
+                    loss = dmodel(x, y)
             with record_function("backward"):
                 loss.backward()
                 torch.cuda.synchronize()

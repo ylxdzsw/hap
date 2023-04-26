@@ -29,6 +29,6 @@ dgraph = hetspmd.main(model, {
     "rank": 0
 })
 
-print(dgraph, flush=True)
+# print(dgraph, flush=True)
 
-dmodel = torch.fx.GraphModule(model, dgraph)
+# dmodel = torch.fx.GraphModule(model, dgraph)

@@ -113,18 +113,38 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
             s.iter().map(|d| Expression::symbol(*d)).collect()
         }).collect::<Vec<_>>();
 
-        let a_star_context = AStarContext {
-            triple_set: &triple_set,
-            sharding_ratios: &sharding_ratios_exp,
-            symbol_values: &symbol_values
-        };
+        let mut best_of_the_best: Option<Program> = None;
 
-        let best_program = a_star(&a_star_context, &default_properties, &profiler);
-        eprintln!("===== Result =====\n\n");
-        best_program.show(&triple_set);
+        loop {
+            let a_star_context = AStarContext {
+                triple_set: &triple_set,
+                sharding_ratios: &sharding_ratios_exp,
+                symbol_values: &symbol_values
+            };
 
-        sharding_ratio_optimization(&best_program, &triple_set, &sharding_ratios, &profiler);
+            let best_program = a_star(&a_star_context, &default_properties, &profiler);
+            sharding_ratio_optimization(&best_program, &triple_set, &sharding_ratios, &profiler, &mut symbol_values);
 
+            if best_of_the_best.is_none() || best_program.cost < best_of_the_best.as_ref().unwrap().cost {
+                best_program.show(&triple_set);
+                eprintln!("=== sharding ratios ===");
+                for i in 0..sharding_ratios.len() {
+                    eprint!("[");
+                    for j in 0..sharding_ratios[i].len() {
+                        if j > 0 {
+                            eprint!(" ");
+                        }
+                        eprint!("{}", symbol_values[sharding_ratios[i][j].0]);
+                    }
+                    eprintln!("]");
+                }
+                eprintln!("");
+
+                best_of_the_best = Some(best_program);
+            } else {
+                break
+            }
+        }
 
         let mut codegen_context = CodegenContext::new(
             py, py_graph_module, &rgraph, get_config!("rank"),
@@ -133,7 +153,7 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
             }).collect()
         )?;
 
-        best_program.codegen(&triple_set, &mut codegen_context)?;
+        best_of_the_best.unwrap().codegen(&triple_set, &mut codegen_context)?;
 
         Ok(codegen_context.graph)
     }))?;
@@ -1286,8 +1306,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
     parsing_handlers.insert(py.eval("torch.nn.functional.relu", None, None)?.as_ptr() as _, &handle_relu);
     fn handle_relu(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
         let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
-
-        assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "inplace")?.extract::<bool>(ctx.py)? == false);
+        let inplace: bool = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "inplace")?.extract(ctx.py)?;
 
         let py_input_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "input")?;
         let input_tensor_id = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
@@ -1297,9 +1316,9 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.relu".to_string(),
-            codegen: Box::new(|py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs| {
                 let input = &inputs[0];
-                let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.relu", None, None)?, (input, )), None)?;
+                let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.relu", None, None)?, (input, ), Some(py_dict!(py, inplace => inplace))), None)?;
                 Ok(smallvec![output])
             }),
             flops: Box::new(|shapes| {
@@ -1470,6 +1489,345 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
         Ok(())
     }
+
+    parsing_handlers.insert(py.eval("torch.nn.functional.conv2d", None, None)?.as_ptr() as _, &handle_conv2d);
+    #[allow(non_snake_case)]
+    fn handle_conv2d(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_input_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 0)?;
+        let py_weight_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 1)?;
+        let py_bias_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 2)?;
+
+        let stride: (usize, usize) = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 3)?.extract(ctx.py)?;
+        let padding: (usize, usize) = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 4)?.extract(ctx.py)?;
+        let dilation: (usize, usize) = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 5)?.extract(ctx.py)?;
+        let groups: usize = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 6)?.extract(ctx.py)?;
+
+        assert_eq!(stride, (1, 1));
+        assert_eq!(padding, (1, 1));
+        assert_eq!(dilation, (1, 1));
+        assert_eq!(groups, 1);
+
+        let input_tensor_id = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let weight_tensor_id = ctx.results[py_weight_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let bias_tensor_id = ctx.results[py_bias_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let input_shape = &ctx.graph[input_tensor_id].shape;
+        let N = input_shape[0];
+        let C = input_shape[1];
+        let H = input_shape[2];
+        let W = input_shape[3];
+        let O = ctx.graph[weight_tensor_id].shape[0];
+        let kH = ctx.graph[weight_tensor_id].shape[2];
+        let kW = ctx.graph[weight_tensor_id].shape[3];
+
+        let op = Rc::new(Op {
+            py_name: "torch.nn.functional.conv2d".to_string(),
+            codegen: Box::new(move |py, graph, inputs| {
+                let input = &inputs[0];
+                let weight = &inputs[1];
+                let bias = &inputs[2];
+                let args = (input, weight, bias, (1, 1), (1, 1), (1, 1), 1);
+                let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.conv2d", None, None)?, args), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                let input_shape = &shapes[0];
+                let output_channel = shapes[1][0].clone();
+                3. * output_channel * input_shape.iter().cloned().product::<Expression>()
+            }),
+            info: BTreeMap::new()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: smallvec![N, O, H, W],
+            communicatable: true
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_tensor_id, weight_tensor_id, bias_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[input_tensor_id].consumers.push(node_id);
+        ctx.graph[weight_tensor_id].consumers.push(node_id);
+        ctx.graph[bias_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
+
+    parsing_handlers.insert(py.eval("torch.flatten", None, None)?.as_ptr() as _, &handle_flatten);
+    fn handle_flatten(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_input_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "input")?;
+        let start_dim: i32 = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "start_dim")?.extract(ctx.py)?;
+        let end_dim: i32 = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "end_dim")?.extract(ctx.py)?;
+
+        assert_eq!(end_dim, -1);
+
+        let input_tensor_id = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let input_shape = &ctx.graph[input_tensor_id].shape;
+        let mut output_shape = input_shape.clone();
+        output_shape.truncate(start_dim as usize);
+        output_shape.push(input_shape[start_dim as usize..].iter().cloned().product::<usize>());
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let op = Rc::new(Op {
+            py_name: "torch.flatten".to_string(),
+            codegen: Box::new(move |py, graph, inputs| {
+                let input = &inputs[0];
+                let output = graph.call_method(py, "call_function", (py.eval("torch.flatten", None, None)?, (input, start_dim, -1)), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                let input_shape = &shapes[0];
+                input_shape.iter().cloned().product::<Expression>()
+            }),
+            info: [("start_dim".to_string(), start_dim.to_string())].into_iter().collect()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: output_shape,
+            communicatable: true
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[input_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
+
+    parsing_handlers.insert(py.eval("torch.log_softmax", None, None)?.as_ptr() as _, &handle_log_softmax);
+    fn handle_log_softmax(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_input_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 0)?;
+        let dim: i32 = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "dim")?.extract(ctx.py)?;
+
+        let input_tensor_id = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let dim = if dim < 0 {
+            ctx.graph[input_tensor_id].n_dims() as i32 + dim
+        } else {
+            dim
+        } as Dimension;
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let op = Rc::new(Op {
+            py_name: "torch.log_softmax".to_string(),
+            codegen: Box::new(move |py, graph, inputs| {
+                let input = &inputs[0];
+                let output = graph.call_method(py, "call_function", (py.eval("torch.log_softmax", None, None)?, (input, dim)), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                let input_shape = &shapes[0];
+                15. * input_shape.iter().cloned().product::<Expression>()
+            }),
+            info: [("dim".to_string(), dim.to_string())].into_iter().collect()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: ctx.graph[input_tensor_id].shape.clone(),
+            communicatable: false
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[input_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
+
+    parsing_handlers.insert(py.eval("torch.nn.functional.nll_loss", None, None)?.as_ptr() as _, &handle_nll_loss);
+    fn handle_nll_loss(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_input_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "input")?;
+        let py_target_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "target")?;
+        let reduction: String = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "reduction")?.extract(ctx.py)?;
+
+        let input_tensor_id = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let target_tensor_id = ctx.results[py_target_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        assert_eq!(ctx.graph[input_tensor_id].n_dims() - 1, ctx.graph[target_tensor_id].n_dims());
+
+        let n_extra_dims = ctx.graph[input_tensor_id].n_dims() - 2;
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let op = Rc::new(Op {
+            py_name: "torch.nn.functional.nll_loss".to_string(),
+            codegen: Box::new(move |py, graph, inputs| {
+                let input = &inputs[0];
+                let target = &inputs[1];
+                let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.nll_loss", None, None)?, (input, target), Some(py_dict!(py, reduction => reduction))), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                let input_shape = &shapes[0];
+                input_shape.iter().cloned().product::<Expression>()
+            }),
+            info: [("n_extra_dims".to_string(), n_extra_dims.to_string())].into_iter().collect()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: smallvec![],
+            communicatable: false
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_tensor_id, target_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[input_tensor_id].consumers.push(node_id);
+        ctx.graph[target_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
+
+    parsing_handlers.insert(py.eval("torch.nn.functional.max_pool2d", None, None)?.as_ptr() as _, &handle_max_pool2d);
+    #[allow(non_snake_case)]
+    fn handle_max_pool2d(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_input_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "input")?;
+
+        let kernel_size: usize = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "kernel_size")?.extract(ctx.py)?;
+        let stride: usize = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "stride")?.extract(ctx.py)?;
+        let padding: usize = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "padding")?.extract(ctx.py)?;
+        let dilation: usize = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "dilation")?.extract(ctx.py)?;
+
+        assert_eq!(stride, 2);
+        assert_eq!(stride, 2);
+        assert_eq!(padding, 0);
+        assert_eq!(dilation, 1);
+
+        let input_tensor_id = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let input_shape = &ctx.graph[input_tensor_id].shape;
+        let N = input_shape[0];
+        let C = input_shape[1];
+        let H = input_shape[2];
+        let W = input_shape[3];
+
+        let op = Rc::new(Op {
+            py_name: "torch.nn.functional.max_pool2d".to_string(),
+            codegen: Box::new(move |py, graph, inputs| {
+                let input = &inputs[0];
+                let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.max_pool2d", None, None)?, (input, ), Some(py_dict!(py, kernel_size=>kernel_size, stride=>stride, padding=>padding, dilation=>dilation))), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                let input_shape = &shapes[0];
+                3. * input_shape.iter().cloned().product::<Expression>()
+            }),
+            info: BTreeMap::new()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: smallvec![N, C, H / 2, W / 2],
+            communicatable: true
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[input_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
+
+    parsing_handlers.insert(py.eval("torch.nn.functional.adaptive_avg_pool2d", None, None)?.as_ptr() as _, &handle_adaptive_avg_pool2d);
+    fn handle_adaptive_avg_pool2d(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_input_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "input")?;
+
+        let output_size: (usize, usize) = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "output_size")?.extract(ctx.py)?;
+
+        let input_tensor_id = ctx.results[py_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let input_shape = &ctx.graph[input_tensor_id].shape;
+
+        let op = Rc::new(Op {
+            py_name: "torch.nn.functional.adaptive_avg_pool2d".to_string(),
+            codegen: Box::new(move |py, graph, inputs| {
+                let input = &inputs[0];
+                let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.adaptive_avg_pool2d", None, None)?, (input, output_size)), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                let input_shape = &shapes[0];
+                3. * input_shape.iter().cloned().product::<Expression>()
+            }),
+            info: BTreeMap::new()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: smallvec![input_shape[0], input_shape[1], output_size.0, output_size.1],
+            communicatable: true
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![input_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[input_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
+
 
     Ok(parsing_handlers)
 }
@@ -2128,6 +2486,135 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
         }
     });
 
+    // Conv2D
+    for_each_op!("torch.nn.functional.conv2d", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        let input = node.inputs[0];
+        let weight = node.inputs[1];
+        let bias = node.inputs[2];
+        let output = node.outputs[0];
+
+        add_comp_triple(
+            smallvec![Property::gather(input, 0), Property::identity(weight), Property::identity(bias)],
+            smallvec![Property::gather(output, 0)],
+            op.clone(),
+        );
+
+        add_comp_triple(
+            smallvec![Property::identity(input), Property::gather(weight, 0), Property::gather(bias, 0)],
+            smallvec![Property::gather(output, 1)],
+            op.clone(),
+        );
+    });
+
+    // Flatten
+    for_each_op!("torch.flatten", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        let start_dim: Dimension = op.info["start_dim"].parse().unwrap();
+
+        for dim in 0..start_dim {
+            add_comp_triple(
+                smallvec![Property::gather(node.inputs[0], dim)],
+                smallvec![Property::gather(node.outputs[0], dim)],
+                op.clone(),
+            );
+        }
+    });
+
+    // LogSoftmax
+    for_each_op!("torch.log_softmax", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        let dim: Dimension = op.info["dim"].parse().unwrap();
+
+        for d in 0..rgraph[node.inputs[0]].n_dims() {
+            if d != dim {
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], d)],
+                    smallvec![Property::gather(node.outputs[0], d)],
+                    op.clone(),
+                );
+            }
+        }
+    });
+
+    // NLL Loss
+    for_each_op!("torch.nn.functional.nll_loss", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        let n_extra_dims: Dimension = op.info["n_extra_dims"].parse().unwrap();
+        let input = node.inputs[0];
+        let target = node.inputs[1];
+        let output = node.outputs[0];
+
+        add_comp_triple(
+            smallvec![Property::gather(input, 0), Property::gather(target, 0)],
+            smallvec![Property::reduce(output)],
+            op.clone(),
+        );
+
+        for dim in 0..n_extra_dims {
+            add_comp_triple(
+                smallvec![Property::gather(input, dim + 2), Property::gather(target, dim + 1)],
+                smallvec![Property::reduce(output)],
+                op.clone(),
+            );
+        }
+    });
+
+    // Max Pool 2D
+    for_each_op!("torch.nn.functional.max_pool2d", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        add_comp_triple(
+            smallvec![Property::gather(node.inputs[0], 0)],
+            smallvec![Property::gather(node.outputs[0], 0)],
+            op.clone(),
+        );
+
+        add_comp_triple(
+            smallvec![Property::gather(node.inputs[0], 1)],
+            smallvec![Property::gather(node.outputs[0], 1)],
+            op.clone(),
+        );
+    });
+
+    // Adaptive Avg Pool 2D
+    for_each_op!("torch.nn.functional.adaptive_avg_pool2d", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        add_comp_triple(
+            smallvec![Property::gather(node.inputs[0], 0)],
+            smallvec![Property::gather(node.outputs[0], 0)],
+            op.clone(),
+        );
+    });
 
     triples
 }
@@ -2422,7 +2909,7 @@ impl<T: Into<f64>> From<T> for Expression {
     }
 }
 
-fn sharding_ratio_optimization(program: &Program, triple_set: &IndexedHoareTripleSet, sharding_ratios: &[Vec<SymbolId>], profiler: &Profiler) {
+fn sharding_ratio_optimization(program: &Program, triple_set: &IndexedHoareTripleSet, sharding_ratios: &[Vec<SymbolId>], profiler: &Profiler, symbol_values: &mut [f64]) {
     let mut model = coin_cbc::Model::default();
 
     model.set_parameter("slogLevel", "0");
@@ -2501,15 +2988,10 @@ fn sharding_ratio_optimization(program: &Program, triple_set: &IndexedHoareTripl
     // model.to_raw().write_mps(&std::ffi::CString::new("sharding_ratio").unwrap());
 
     let sol = model.solve();
-    eprintln!("=== sharding ratios ===");
+
     for i in 0..n_segments {
-        eprint!("[");
         for j in 0..n_devices {
-            if j > 0 {
-                eprint!(" ");
-            }
-            eprint!("{}", sol.col(sharding_ratios_cbc[sharding_ratios[i][j].0]));
+            symbol_values[sharding_ratios[i][j].0] = sol.col(sharding_ratios_cbc[sharding_ratios[i][j].0]);
         }
-        eprintln!("]");
     }
 }
