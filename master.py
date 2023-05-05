@@ -22,7 +22,7 @@ dgraph = hetspmd.main(model, {
         config.profiler_data["device_flops"] * 0.5,
         config.profiler_data["device_flops"] * 0.5,
     ],
-    "all_reduce_bandwidth": config.profiler_data["all_reduce"],
+    "all_reduce_bandwidth": config.profiler_data["all_reduce"] / 9.8,
     "all_gather_bandwidth": config.profiler_data["all_gather"],
     "reduce_scatter_bandwidth": config.profiler_data["reduce_scatter"],
     "all_to_all_bandwidth": config.profiler_data["all_to_all"],
