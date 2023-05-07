@@ -28,8 +28,47 @@ class AllGather(torch.autograd.Function):
         grad = grad.split([ctx.sharding_lengths[ctx.rank], max(ctx.sharding_lengths) - ctx.sharding_lengths[ctx.rank]], dim=ctx.dim)[0]
         return grad, None, None, None
 
+class AllGatherByGroupCall(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor, dim, sharding_lengths, rank):
+        ctx.dim, ctx.sharding_lengths, ctx.rank = dim, sharding_lengths, rank
+        tensor_slices = [
+            torch.empty(*sharded_shape(tensor.shape, dim, sharding_length), device=tensor.device)
+            if i != rank else tensor
+            for i, sharding_length in enumerate(sharding_lengths)
+        ]
+
+        reqs = []
+        with dist.distributed_c10d._coalescing_manager(None, reqs):
+            for i, t in enumerate(tensor_slices):
+                req = dist.broadcast(t, i, async_op=True) # TODO: try sync version?
+                reqs.append(req)
+
+        for req in reqs: # do we really need to wait?
+            req.wait()
+
+        return torch.cat(tensor_slices, dim=dim)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_output_slices = torch.split(grad_output, ctx.sharding_lengths, dim=ctx.dim)
+        grad_output_slices = [ x.contiguous() for x in grad_output_slices ]
+
+        reqs = []
+        with dist.distributed_c10d._coalescing_manager(None, reqs):
+            for i, grad_output_slice in enumerate(grad_output_slices):
+                req = dist.reduce(grad_output_slice, i, async_op=True)
+                reqs.append(req)
+
+        for req in reqs:
+            req.wait()
+
+        return grad_output_slices[ctx.rank], None, None, None
+
+
 # aliasing prevents assigning __module__, which is required by fx.node.Node.__repr__, otherwise it crashes
 def all_gather(tensor, dim, sharding_lengths, rank): return AllGather.apply(tensor, dim, sharding_lengths, rank)
+def all_gather_by_group_call(tensor, dim, sharding_lengths, rank): return AllGatherByGroupCall.apply(tensor, dim, sharding_lengths, rank)
 
 class AllReduce(torch.autograd.Function):
     @staticmethod
@@ -63,7 +102,45 @@ class ReduceScatter(torch.autograd.Function):
         grad = torch.cat([ grad_output_slice.split([sharding_length, max(ctx.sharding_lengths) - sharding_length], dim=ctx.dim)[0] for grad_output_slice, sharding_length in zip(grad_output_slices, ctx.sharding_lengths) ], dim=ctx.dim)
         return grad, None, None, None
 
+class ReduceScatterByGroupCall(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor, dim, sharding_lengths, rank):
+        ctx.dim, ctx.sharding_lengths, ctx.rank = dim, sharding_lengths, rank
+        tensor_slices = torch.split(tensor, sharding_lengths, dim=dim)
+        tensor_slices = [ x.contiguous() for x in tensor_slices ]
+
+        reqs = []
+        with dist.distributed_c10d._coalescing_manager(None, reqs):
+            for i, t in enumerate(tensor_slices):
+                req = dist.reduce(t, i, async_op=True)
+                reqs.append(req)
+
+        for req in reqs:
+            req.wait()
+
+        return tensor_slices[rank]
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_output_slices = [
+            torch.empty(*sharded_shape(grad_output.shape, ctx.dim, sharding_length), device=grad_output.device)
+            if i != ctx.rank else grad_output.contiguous()
+            for i, sharding_length in enumerate(ctx.sharding_lengths)
+        ]
+
+        reqs = []
+        with dist.distributed_c10d._coalescing_manager(None, reqs):
+            for i, grad_output_slice in enumerate(grad_output_slices):
+                req = dist.broadcast(grad_output_slice, i, async_op=True)
+                reqs.append(req)
+
+        for req in reqs:
+            req.wait()
+
+        return torch.cat(grad_output_slices, dim=ctx.dim), None, None, None
+
 def reduce_scatter(tensor, dim, sharding_lengths, rank): return ReduceScatter.apply(tensor, dim, sharding_lengths, rank)
+def reduce_scatter_by_group_call(tensor, dim, sharding_lengths, rank): return ReduceScatterByGroupCall.apply(tensor, dim, sharding_lengths, rank)
 
 # Not really a collective operator
 def dynamic_slice(tensor, dim, sharding_lengths, rank):
@@ -77,14 +154,14 @@ class AllToAll(torch.autograd.Function):
     def forward(ctx, tensor, split_dim, cat_dim, split_sharding_lengths, cat_sharding_lengths, rank):
         ctx.split_dim, ctx.cat_dim, ctx.split_sharding_lengths, ctx.cat_sharding_lengths, ctx.rank = split_dim, cat_dim, split_sharding_lengths, cat_sharding_lengths, rank
         tensor_slices = torch.split(tensor.contiguous(), split_sharding_lengths, dim=split_dim)
-        out_slices = [ torch.empty(sharded_shape(tensor_slices[rank].shape, cat_dim, length), device=tensor.device) for length in cat_sharding_lengths ]
+        out_slices = [ torch.empty(*sharded_shape(tensor_slices[rank].shape, cat_dim, length), device=tensor.device) for length in cat_sharding_lengths ]
         dist.all_to_all(out_slices, [ x.contiguous() for x in tensor_slices ])
         return torch.cat(out_slices, dim=cat_dim)
 
     @staticmethod
     def backward(ctx, grad_output):
         grad_output_slices = torch.split(grad_output.contiguous(), ctx.cat_sharding_lengths, dim=ctx.cat_dim)
-        grad_slices = [ torch.empty(sharded_shape(grad_output_slices[ctx.rank].shape, ctx.split_dim, length), device=grad_output.device) for length in ctx.split_sharding_lengths ]
+        grad_slices = [ torch.empty(*sharded_shape(grad_output_slices[ctx.rank].shape, ctx.split_dim, length), device=grad_output.device) for length in ctx.split_sharding_lengths ]
         dist.all_to_all(grad_slices, [ x.contiguous() for x in grad_output_slices ])
         return torch.cat(grad_slices, dim=ctx.split_dim), None, None, None, None, None
 
@@ -127,6 +204,21 @@ def test(rank):
     print(rank, loss, mod.p.grad, flush=True) # expecting: losses are the same, grads are 1
     dist.barrier()
 
+    class Mod1v2(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p = torch.nn.Parameter(torch.ones(5, rank+1))
+
+        def forward(self):
+            return all_gather_by_group_call(self.p, 1, [1,2,3,4], rank).sum() / 4
+
+    print("testing all_gather_by_group_call")
+    mod = Mod1v2().cuda(rank)
+    loss = mod.forward()
+    loss.backward()
+    print(rank, loss, mod.p.grad, flush=True) # expecting: losses are the same, grads are 1
+    dist.barrier()
+
     class Mod2(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -152,6 +244,21 @@ def test(rank):
 
     print("testing reduce_scatter")
     mod = Mod3().cuda(rank)
+    loss = mod.forward()
+    loss.backward()
+    print(rank, loss, mod.p.grad, flush=True) # expecting: losses propotional to rank, grads are 1
+    dist.barrier()
+
+    class Mod3v2(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p = torch.nn.Parameter(torch.ones(5, 10))
+
+        def forward(self):
+            return reduce_scatter_by_group_call(self.p, 1, [1,2,3,4], rank).sum()
+
+    print("testing reduce_scatter_by_group_call")
+    mod = Mod3v2().cuda(rank)
     loss = mod.forward()
     loss.backward()
     print(rank, loss, mod.p.grad, flush=True) # expecting: losses propotional to rank, grads are 1
