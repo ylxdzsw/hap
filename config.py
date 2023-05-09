@@ -33,9 +33,9 @@ nheads = 12
 segmentation = True
 # segmentation = False
 
-# master_addr = "10.28.1.30"
-master_addr = "127.0.0.1"
-master_port = 39263
+master_addr = "10.28.1.30"
+# master_addr = "127.0.0.1"
+master_port = 39264
 
 # trace = True
 trace = False
@@ -51,7 +51,7 @@ profile_noise = 0
 
 lr = 5e-4
 
-run_iter = 100
+run_iter = 40
 avg_iter = 20
 log_iter = 20
 

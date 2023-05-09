@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt::{Display, Debug, Formatter};
 use std::cmp::Ordering;
 use float_ord::FloatOrd;
-use cpython::{PyResult, PyTuple, ToPyObject, ObjectProtocol, Python, PyObject, PyDict, PyClone, PyNone};
+use cpython::{PyResult, PyTuple, ToPyObject, ObjectProtocol, Python, PyObject, PyDict, PyClone, PyNone, PyList};
 use smallvec::{SmallVec, smallvec};
 
 pub type SVec<T, const N: usize = 1> = SmallVec<[T; N]>;
@@ -51,11 +51,11 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         }).unwrap();
     }
 
-    m.add(py, "init", cpython::py_fn!(py, init() -> PyResult<PyNone> {
+    m.add(py, "init", cpython::py_fn!(py, py_init() -> PyResult<PyNone> {
         py.run(init_script, None, None).map(|_| PyNone)
     }))?;
 
-    m.add(py, "main", cpython::py_fn!(py, main(py_graph_module: PyObject, py_config: PyObject) -> PyResult<PyObject> {
+    m.add(py, "main", cpython::py_fn!(py, py_main(py_graph_module: PyObject, py_config: PyObject) -> PyResult<PyObject> {
         macro_rules! get_config {
             ($key: expr) => { py_config.get_item(py, $key)?.extract(py)? }
         }
@@ -156,6 +156,15 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         best_of_the_best.unwrap().codegen(&triple_set, &mut codegen_context)?;
 
         Ok(codegen_context.graph)
+    }))?;
+
+    m.add(py, "sharding_round", cpython::py_fn!(py, py_sharding_round(py_full_length: usize, py_ratios: PyObject) -> PyResult<PyNone> {
+        let sharding_ratio: Vec<f64> = py_ratios.extract(py)?;
+        let result = sharding_round(py_full_length, &sharding_ratio);
+        for i in 0..result.len() {
+            py_ratios.set_item(py, i, result[i])?;
+        }
+        Ok(PyNone)
     }))?;
 
     Ok(())
