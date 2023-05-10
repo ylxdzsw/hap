@@ -4,8 +4,6 @@ import datetime
 import time
 import torch
 import torch.fx
-from torch.profiler import profile, record_function, ProfilerActivity
-from contextlib import nullcontext
 import numpy as np
 import hetspmd
 import collectives
@@ -16,7 +14,7 @@ def run(global_rank, local_rank, max_ratio, queue):
     import torch.distributed as dist
     dist.init_process_group('nccl', rank=global_rank, timeout=datetime.timedelta(hours=2))
 
-    total_length = 256 * 1024 # 256MB
+    total_length = 4 * 1024 # 4MB
     sharding_lengths = [max_ratio] + [(1 - max_ratio) / (config.world_size - 1)] * (config.world_size - 1)
     sharding_lengths = [ x / sum(sharding_lengths) for x in sharding_lengths]
     hetspmd.sharding_round(total_length, sharding_lengths)
@@ -29,8 +27,8 @@ def run(global_rank, local_rank, max_ratio, queue):
     result_times = []
     last_iter_time = time.time()
     for iter in range(config.run_iter):
-        # collectives.all_gather(tensor, 1, sharding_lengths, global_rank)
-        collectives.all_gather_by_group_call(tensor, 1, sharding_lengths, global_rank)
+        collectives.all_gather(tensor, 1, sharding_lengths, global_rank)
+        # collectives.all_gather_by_group_call(tensor, 1, sharding_lengths, global_rank)
         # torch.cuda.synchronize()
         dist.barrier()
 
