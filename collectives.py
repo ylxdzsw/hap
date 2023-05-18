@@ -44,7 +44,7 @@ class AllGatherByGroupCall(torch.autograd.Function):
                 req = dist.broadcast(t, i, async_op=True) # TODO: try sync version?
                 reqs.append(req)
 
-        for req in reqs: # do we really need to wait?
+        for req in reqs: # https://pytorch.org/docs/stable/distributed.html#synchronous-and-asynchronous-collective-operations In the case of CUDA collectives, will block until the operation has been successfully enqueued onto a CUDA stream and the output can be utilized on the default stream without further synchronization.
             req.wait()
 
         return torch.cat(tensor_slices, dim=dim)

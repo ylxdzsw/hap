@@ -6,14 +6,14 @@ rootpath = "/root/hetspmd"
 # sys.path.insert(1, f"{rootpath}/spmd")
 
 # model_name = "Tmlp"
-# model_name = "Ttransformer"
+model_name = "Ttransformer"
 # model_name = "Rmoe"
 # model_name = "Rswitch"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
-model_name = "Vvgg"
+# model_name = "Vvgg"
 
-world_size = 4
+world_size = 2
 nlayers = 4
 n_expert = 2 * world_size
 batch_size = 64 * world_size
@@ -33,8 +33,8 @@ nheads = 12
 segmentation = True
 # segmentation = False
 
-master_addr = "10.28.1.30"
-# master_addr = "127.0.0.1"
+# master_addr = "10.28.1.30"
+master_addr = "127.0.0.1"
 master_port = 39264
 
 # trace = True
@@ -51,7 +51,7 @@ profile_noise = 0
 
 lr = 5e-4
 
-run_iter = 40
+run_iter = 50
 avg_iter = 20
 log_iter = 20
 
@@ -165,6 +165,7 @@ profiler_data = {
 
     "device_flops": 4139214925014,
 
-    'all_gather': 1224592728, 'all_reduce': 611692856, 'reduce_scatter': 1130230706, 'all_to_all': 10701240728,
+    # 'all_gather': 1224592728, 'all_reduce': 611692856, 'reduce_scatter': 1130230706, 'all_to_all': 10701240728,
     # 'all_gather': 7429968322//2, 'all_reduce': 4421821530//2, 'reduce_scatter': 7537901123//2, 'all_to_all': 25451035500//2
+    'all_gather': 44984891222, 'all_gather_by_group_call': 67835491296, 'all_reduce': 82652529708, 'reduce_scatter': 44487643835, 'reduce_scatter_by_group_call': 73179489070, 'all_to_all': 163615224737
 }

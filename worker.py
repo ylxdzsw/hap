@@ -26,10 +26,7 @@ def run(global_rank, local_rank):
         "input_shape": config.input_shape(),
         "device_flops": [
             config.profiler_data["device_flops"],
-            config.profiler_data["device_flops"],
-            config.profiler_data["device_flops"],
-            config.profiler_data["device_flops"],
-        ],
+        ] * config.world_size,
         "all_reduce_bandwidth": config.profiler_data["all_reduce"],
         "all_gather_bandwidth": config.profiler_data["all_gather"],
         "reduce_scatter_bandwidth": config.profiler_data["reduce_scatter"],
