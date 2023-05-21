@@ -38,8 +38,8 @@ segmentation = True
 master_addr = "127.0.0.1"
 master_port = 39264
 
-# trace = True
-trace = False
+trace = True
+# trace = False
 
 # use_hints = True
 use_hints = False

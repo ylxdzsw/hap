@@ -41,6 +41,10 @@ def split_param_or_buffer(graph_module, target, sharding_lengths, dim, rank):
         p = graph_module.get_parameter(target)
     except AttributeError:
         p = graph_module.get_buffer(target)
+
+    if p.data.shape[dim] == 1: # hack for broadcasting
+        return
+
     p.data = torch.split(p.data, sharding_lengths, dim)[rank]
 "#;
 
@@ -859,7 +863,7 @@ impl<'py, 'r> CodegenContext<'py, 'r> {
 
 pub struct Op {
     py_name: String,
-    codegen: Box<dyn Fn(Python, &PyObject, &[PyObject]) -> PyResult<SVec<PyObject, 1>>>,
+    codegen: Box<dyn Fn(Python, &PyObject, &[PyObject], &[Shape]) -> PyResult<SVec<PyObject, 1>>>,
     flops: Box<dyn Fn(&[SymbolicShape]) -> Expression>,
     info: BTreeMap<String, String>, // additional info for generating triples
 }
@@ -940,7 +944,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.linear".to_string(),
-            codegen: Box::new(|py, graph, inputs| {
+            codegen: Box::new(|py, graph, inputs, _shapes| {
                 if let [input, weight, bias] = inputs {
                     let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.linear", None, None)?, (input, weight, bias)), None)?;
                     Ok(smallvec![output])
@@ -995,7 +999,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.sigmoid".to_string(),
-            codegen: Box::new(|py, graph, inputs| {
+            codegen: Box::new(|py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.sigmoid", None, None)?, (input, )), None)?;
                 Ok(smallvec![output])
@@ -1043,7 +1047,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.sum".to_string(),
-            codegen: Box::new(|py, graph, inputs| {
+            codegen: Box::new(|py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.sum", None, None)?, (input, )), None)?;
                 Ok(smallvec![output])
@@ -1121,7 +1125,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.transpose".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.transpose", None, None)?, (input, dim0, dim1)), None)?;
                 Ok(smallvec![output])
@@ -1169,7 +1173,6 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let dropout_p = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "dropout_p")?.extract::<f64>(ctx.py)?;
         let num_heads = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "num_heads")?.extract::<i32>(ctx.py)?;
-        let embed_dim_to_check = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "embed_dim_to_check")?.extract::<i32>(ctx.py)?;
 
         assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "bias_k").map(|x| x.is_none(ctx.py)).unwrap_or(false));
         assert!(py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "bias_v").map(|x| x.is_none(ctx.py)).unwrap_or(false));
@@ -1208,7 +1211,8 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.multi_head_attention_forward".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, shapes| {
+                eprintln!("{:?}", shapes);
                 let outputs = match inputs {
                     [query, key, value, in_proj_weight, in_proj_bias, out_proj_weight, out_proj_bias] => {
                         graph.call_method(py, "call_function", (py.eval("torch.nn.functional.multi_head_attention_forward", None, None)?, PyNone,
@@ -1216,7 +1220,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
                                 query => query, key => key, value => value,
                                 in_proj_weight => in_proj_weight, in_proj_bias => in_proj_bias,
                                 out_proj_weight => out_proj_weight, out_proj_bias => out_proj_bias,
-                                embed_dim_to_check => embed_dim_to_check, num_heads => num_heads,
+                                embed_dim_to_check => shapes[0][2], num_heads => num_heads,
                                 bias_k => PyNone, bias_v => PyNone, add_zero_attn => false, dropout_p => dropout_p
                             )
                         ), None)?
@@ -1228,7 +1232,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
                                 in_proj_weight => in_proj_weight, in_proj_bias => in_proj_bias,
                                 out_proj_weight => out_proj_weight, out_proj_bias => out_proj_bias,
                                 attn_mask => attn_mask,
-                                embed_dim_to_check => embed_dim_to_check, num_heads => num_heads,
+                                embed_dim_to_check => shapes[0][2], num_heads => num_heads,
                                 bias_k => PyNone, bias_v => PyNone, add_zero_attn => false, dropout_p => dropout_p
                             )
                         ), None)?
@@ -1325,7 +1329,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.relu".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.relu", None, None)?, (input, ), Some(py_dict!(py, inplace => inplace))), None)?;
                 Ok(smallvec![output])
@@ -1372,7 +1376,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.dropout".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.dropout", None, None)?, (input, p)), None)?;
                 Ok(smallvec![output])
@@ -1422,7 +1426,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "operator.add".to_string(),
-            codegen: Box::new(|py, graph, inputs| {
+            codegen: Box::new(|py, graph, inputs, _shapes| {
                 let a = &inputs[0];
                 let b = &inputs[1];
                 let output = graph.call_method(py, "call_function", (py.eval("operator.add", None, None)?, (a, b)), None)?;
@@ -1471,7 +1475,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
             let op = Rc::new(Op {
                 py_name: "operator.mul".to_string(),
-                codegen: Box::new(move |py, graph, inputs| {
+                codegen: Box::new(move |py, graph, inputs, _shapes| {
                     let a = &inputs[0];
                     let output = graph.call_method(py, "call_function", (py.eval("operator.mul", None, None)?, (a, num)), None)?;
                     Ok(smallvec![output])
@@ -1513,7 +1517,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "operator.mul".to_string(),
-            codegen: Box::new(|py, graph, inputs| {
+            codegen: Box::new(|py, graph, inputs, _shapes| {
                 let a = &inputs[0];
                 let b = &inputs[1];
                 let output = graph.call_method(py, "call_function", (py.eval("operator.mul", None, None)?, (a, b)), None)?;
@@ -1561,7 +1565,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         let normalized_shape_copy = normalized_shape.clone();
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.layer_norm".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.layer_norm", None, None)?, (input, normalized_shape_copy.clone())), None)?;
                 Ok(smallvec![output])
@@ -1629,7 +1633,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.conv2d".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let weight = &inputs[1];
                 let bias = &inputs[2];
@@ -1687,7 +1691,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.flatten".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.flatten", None, None)?, (input, start_dim, -1)), None)?;
                 Ok(smallvec![output])
@@ -1737,7 +1741,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.log_softmax".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.log_softmax", None, None)?, (input, dim)), None)?;
                 Ok(smallvec![output])
@@ -1788,7 +1792,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.nll_loss".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let target = &inputs[1];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.nll_loss", None, None)?, (input, target), Some(py_dict!(py, reduction => reduction))), None)?;
@@ -1851,7 +1855,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.max_pool2d".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.max_pool2d", None, None)?, (input, ), Some(py_dict!(py, kernel_size=>kernel_size, stride=>stride, padding=>padding, dilation=>dilation))), None)?;
                 Ok(smallvec![output])
@@ -1899,7 +1903,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.adaptive_avg_pool2d".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.adaptive_avg_pool2d", None, None)?, (input, output_size)), None)?;
                 Ok(smallvec![output])
@@ -1948,7 +1952,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
 
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.embedding".to_string(),
-            codegen: Box::new(move |py, graph, inputs| {
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let weight = &inputs[1];
                 let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.embedding", None, None)?, (input, weight)), None)?;
@@ -2385,8 +2389,10 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                 let op = op.clone();
                 let pre_conditions = pre_conditions.clone();
                 move |ctx| {
-                    let inputs: Vec<_> = pre_conditions.iter().map(|p| ctx.get_property_implementation(*p)).collect();
-                    let outputs = (op.codegen)(ctx.py, &ctx.graph, &inputs)?;
+                    let (inputs, shapes): (Vec<_>, Vec<_>) = pre_conditions.iter()
+                        .map(|p| (ctx.get_property_implementation(*p), ctx.get_shape_by_property(*p)))
+                        .unzip();
+                    let outputs = (op.codegen)(ctx.py, &ctx.graph, &inputs, &shapes)?;
                     for (output_property, py_output) in post_conditions.iter().filter(|p| matches!(p, Property::HasTensor(_, _))).zip(outputs) {
                         ctx.set_property_implementation(*output_property, py_output);
                     }
@@ -2546,24 +2552,24 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
             op.clone(),
         );
 
-        let mut inputs = smallvec![
-            Property::gather(node.inputs[0], 2), // query
-            Property::gather(node.inputs[1], 2), // key
-            Property::gather(node.inputs[2], 2), // value
-            Property::gather(node.inputs[3], 0), // in_proj_weight
-            Property::gather(node.inputs[4], 0), // in_proj_bias
-            Property::gather(node.inputs[5], 1), // out_proj_weight
-        ];
+        // let mut inputs = smallvec![
+        //     Property::gather(node.inputs[0], 2), // query
+        //     Property::gather(node.inputs[1], 2), // key
+        //     Property::gather(node.inputs[2], 2), // value
+        //     Property::gather(node.inputs[3], 0), // in_proj_weight
+        //     Property::gather(node.inputs[4], 0), // in_proj_bias
+        //     Property::gather(node.inputs[5], 1), // out_proj_weight
+        // ];
 
-        for x in 6..node.inputs.len() {
-            inputs.push(Property::identity(node.inputs[x]));
-        }
+        // for x in 6..node.inputs.len() {
+        //     inputs.push(Property::identity(node.inputs[x]));
+        // }
 
-        add_comp_triple(
-            inputs,
-            smallvec![Property::reduce(node.outputs[0]), Property::reduce(node.outputs[1])],
-            op.clone(),
-        )
+        // add_comp_triple(
+        //     inputs,
+        //     smallvec![Property::reduce(node.outputs[0]), Property::reduce(node.outputs[1])],
+        //     op.clone(),
+        // )
     });
 
     // ReLU
@@ -2820,11 +2826,11 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
 
     // Embedding
     for_each_op!("torch.nn.functional.embedding", |node, op| {
-        add_comp_triple(
-            node.inputs.iter().cloned().map(Property::identity).collect(),
-            node.outputs.iter().cloned().map(Property::identity).collect(),
-            op.clone(),
-        );
+        // add_comp_triple(
+        //     node.inputs.iter().cloned().map(Property::identity).collect(),
+        //     node.outputs.iter().cloned().map(Property::identity).collect(),
+        //     op.clone(),
+        // );
 
         add_comp_triple(
             smallvec![Property::gather(node.inputs[0], 0), Property::identity(node.inputs[1])],

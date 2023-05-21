@@ -63,7 +63,7 @@ class TMoE(torch.nn.Module):
         return torch.sum(x)
 
 class RTransformer(torch.nn.Module):
-    def __init__(self, ntokens, seqlen, emsize=2048, nheads=4, nhid=2048, dropout=0.2, nlayers=2, segmentation=True):
+    def __init__(self, ntokens, seqlen, emsize, nheads, nhid, dropout, nlayers=2, segmentation=True):
         super().__init__()
         self.emsize = emsize
         self.criterion = torch.nn.NLLLoss(reduction='sum')

@@ -27,7 +27,7 @@ def run(global_rank, local_rank):
         "device_flops": [
             config.profiler_data["device_flops"],
         ] * config.world_size,
-        "all_reduce_bandwidth": config.profiler_data["all_reduce"],
+        "all_reduce_bandwidth": config.profiler_data["all_reduce"] / 1000,
         "all_gather_bandwidth": config.profiler_data["all_gather"],
         "reduce_scatter_bandwidth": config.profiler_data["reduce_scatter"],
         "all_to_all_bandwidth": config.profiler_data["all_to_all"],
