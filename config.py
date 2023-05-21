@@ -6,7 +6,8 @@ rootpath = "/root/hetspmd"
 # sys.path.insert(1, f"{rootpath}/spmd")
 
 # model_name = "Tmlp"
-model_name = "Ttransformer"
+# model_name = "Ttransformer"
+model_name = "Rtransformer"
 # model_name = "Rmoe"
 # model_name = "Rswitch"
 # model_name = "Vmoe"
@@ -106,7 +107,6 @@ def get_model(seed=None):
 def get_data():
     if model_name.startswith('R'):
         return wikitext2()
-        # return wikitext103()
 
     if model_name.startswith('V'):
         return cifar10()
@@ -124,17 +124,6 @@ def wikitext2():
     sys.path.insert(1, f"{rootpath}/wikitext")
     import data
     corpus = data.Corpus(f"{rootpath}/wikitext")
-    train_data = data.segmentify(data.batchify(corpus.train, batch_size), seqlen)
-    test_data = data.segmentify(data.batchify(corpus.test, batch_size), seqlen)
-    valid_data = data.segmentify(data.batchify(corpus.valid, batch_size), seqlen)
-    ntokens = world_size * (len(corpus.dictionary) // world_size + 1) # we have to ensure that it is dividable
-    return ntokens, train_data, test_data, valid_data
-
-def wikitext103():
-    sys.path.insert(1, f"{rootpath}/wikitext")
-    import data
-    from pathlib import Path
-    corpus = data.Corpus(f"{str(Path.home())}/.torchtext/cache/WikiText103/wikitext-103", is_103=True)
     train_data = data.segmentify(data.batchify(corpus.train, batch_size), seqlen)
     test_data = data.segmentify(data.batchify(corpus.test, batch_size), seqlen)
     valid_data = data.segmentify(data.batchify(corpus.valid, batch_size), seqlen)

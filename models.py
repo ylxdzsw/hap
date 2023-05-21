@@ -63,7 +63,7 @@ class TMoE(torch.nn.Module):
         return torch.sum(x)
 
 class RTransformer(torch.nn.Module):
-    def __init__(self, ntokens, seqlen, emsize=2048, nheads=4, nhid=2048, dropout=0.2, nlayers=2):
+    def __init__(self, ntokens, seqlen, emsize=2048, nheads=4, nhid=2048, dropout=0.2, nlayers=2, segmentation=True):
         super().__init__()
         self.emsize = emsize
         self.criterion = torch.nn.NLLLoss(reduction='sum')
@@ -73,6 +73,7 @@ class RTransformer(torch.nn.Module):
         self.encoder = torch.nn.Embedding(ntokens, emsize)
         self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nheads, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
         self.decoder = torch.nn.Linear(emsize, ntokens)
+        self.segmentation = segmentation
 
     def forward(self, x, y):
         x = self.encoder(x) * math.sqrt(self.emsize)
@@ -80,6 +81,8 @@ class RTransformer(torch.nn.Module):
         x += self.pe
         for layer in self.layers:
             x = layer(x, src_mask)
+            if self.segmentation:
+                x = new_segment(x)
         x = self.decoder(x)
         x = torch.log_softmax(x, dim=-1)
         return self.criterion(x.transpose(1, 2), y) # the input to NLL loss is (N, C, ...), so we move the class prediction to the second dimension
