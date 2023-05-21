@@ -89,6 +89,8 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
             all_to_all_bandwidth: get_config!("all_to_all_bandwidth")
         };
 
+        let provided_sharding_ratios: Option<Vec<f64>> = py_config.get_item(py, "sharding_ratios")?.extract(py).ok();
+
         // todo: merge into context?
         let profiler = Profiler {
             rgraph: &rgraph,
@@ -105,11 +107,13 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         }).collect::<Vec<_>>();
 
         let computation_power_sum = cluster_info.device_flops.iter().sum::<f64>();
-        let computation_power_ratio = cluster_info.device_flops.iter().map(|f| f / computation_power_sum).collect::<Vec<_>>();
+        let computation_power_ratios = cluster_info.device_flops.iter().map(|f| f / computation_power_sum).collect::<Vec<_>>();
+        let initial_sharding_ratios = provided_sharding_ratios.clone().unwrap_or(computation_power_ratios);
         let mut symbol_values = vec![0.; symbol_id_counter.load(std::sync::atomic::Ordering::Relaxed)];
+
         for segment_sharding_ratio in sharding_ratios.iter() {
-            for (sharding_ratio, computation_power_ratio) in segment_sharding_ratio.iter().zip(computation_power_ratio.iter()) {
-                symbol_values[sharding_ratio.0] = *computation_power_ratio;
+            for (sharding_ratio, initial_ratio) in segment_sharding_ratio.iter().zip(initial_sharding_ratios.iter()) {
+                symbol_values[sharding_ratio.0] = *initial_ratio;
             }
         }
 
@@ -127,6 +131,12 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
             };
 
             let best_program = a_star(&a_star_context, &default_properties, &profiler);
+
+            if provided_sharding_ratios.is_some() {
+                best_of_the_best = Some(best_program);
+                break
+            }
+
             sharding_ratio_optimization(&best_program, &triple_set, &sharding_ratios, &profiler, &mut symbol_values);
 
             if best_of_the_best.is_none() || best_program.cost < best_of_the_best.as_ref().unwrap().cost {

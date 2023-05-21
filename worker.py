@@ -31,7 +31,8 @@ def run(global_rank, local_rank):
         "all_gather_bandwidth": config.profiler_data["all_gather"],
         "reduce_scatter_bandwidth": config.profiler_data["reduce_scatter"],
         "all_to_all_bandwidth": config.profiler_data["all_to_all"],
-        "rank": global_rank
+        "rank": global_rank,
+        "sharding_ratios": [0.5, 0.5]
     })
 
     # print(dgraph, flush=True)

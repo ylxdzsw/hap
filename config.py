@@ -17,7 +17,7 @@ model_name = "Rtransformer"
 world_size = 2
 nlayers = 4
 n_expert = 2 * world_size
-batch_size = 64 * world_size
+batch_size = 32 * world_size
 seqlen = 128
 if model_name.startswith('V'):
     seqlen = 64
