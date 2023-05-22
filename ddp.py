@@ -7,6 +7,7 @@ import torch.fx
 from torch.profiler import profile, record_function, ProfilerActivity
 from contextlib import nullcontext
 import numpy as np
+import hetspmd
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -26,11 +27,17 @@ def run(global_rank, local_rank):
     result_times = []
     strat_time = last_iter_time = time.time()
     total_loss = 0
+
+
+    x, y = next(train_data)
+    sharding_lengths = [1] * config.world_size
+    sharding_lengths = [ x / sum(sharding_lengths) for x in sharding_lengths]
+    hetspmd.sharding_round(x.shape[0], sharding_lengths)
+    x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+    y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+
     for iter in range(config.run_iter):
         optimizer.zero_grad()
-        x, y = next(train_data)
-        x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
-        y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
 
         with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
             loss = dmodel(x, y) * config.world_size # DDP averages the loss
@@ -59,9 +66,9 @@ def run(global_rank, local_rank):
     if not config.trace:
         return
 
-    x, y = next(train_data)
-    x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
-    y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+    # x, y = next(train_data)
+    # x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+    # y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
     with profile(
         activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
         # record_shapes = True,

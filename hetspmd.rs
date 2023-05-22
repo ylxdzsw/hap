@@ -89,7 +89,7 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
             all_to_all_bandwidth: get_config!("all_to_all_bandwidth")
         };
 
-        let provided_sharding_ratios: Option<Vec<f64>> = py_config.get_item(py, "sharding_ratios")?.extract(py).ok();
+        let provided_sharding_ratios: Option<Vec<f64>> = py_config.get_item(py, "sharding_ratios").ok().and_then(|x| x.extract(py).ok());
 
         // todo: merge into context?
         let profiler = Profiler {
@@ -170,6 +170,27 @@ cpython::py_module_initializer!(hetspmd, |py, m| {
         best_of_the_best.unwrap().codegen(&triple_set, &mut codegen_context)?;
 
         Ok(codegen_context.graph)
+    }))?;
+
+    m.add(py, "stat", cpython::py_fn!(py, py_stat(py_graph_module: PyObject, py_config: PyObject) -> PyResult<f64> {
+        let py_input_shape_dict = py_config.get_item(py, "input_shape").unwrap();
+
+        let py_input_shape_dict = py_config.get_item(py, "input_shape").unwrap();
+        let rgraph = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
+
+        let mut total_flops = 0.;
+        for node in rgraph.nodes.iter() {
+            if let RInstruction::Op(op) = &node.instruction {
+                let shapes = node.inputs.iter()
+                    .map(|i| &rgraph[*i].shape)
+                    .map(|s| s.iter().map(|x| Expression::constant(*x as _)).collect::<SVec<_, 4>>())
+                    .collect::<SVec<_>>();
+                let flops = (op.flops)(&shapes);
+                total_flops += flops.unwrap_constant();
+            }
+        }
+
+        Ok(total_flops)
     }))?;
 
     m.add(py, "sharding_round", cpython::py_fn!(py, py_sharding_round(py_full_length: usize, py_ratios: PyObject) -> PyResult<PyNone> {
@@ -1222,7 +1243,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.multi_head_attention_forward".to_string(),
             codegen: Box::new(move |py, graph, inputs, shapes| {
-                eprintln!("{:?}", shapes);
+                // eprintln!("{:?}", shapes);
                 let outputs = match inputs {
                     [query, key, value, in_proj_weight, in_proj_bias, out_proj_weight, out_proj_bias] => {
                         graph.call_method(py, "call_function", (py.eval("torch.nn.functional.multi_head_attention_forward", None, None)?, PyNone,
@@ -2080,7 +2101,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                     results: &mut results
                 };
 
-                eprintln!("call_function: {:?}", py_node.getattr(py, "target")?);
+                // eprintln!("call_function: {:?}", py_node.getattr(py, "target")?);
 
                 parsing_handlers[&(py_node.getattr(py, "target")?.as_ptr() as _)](ctx, py_node)?;
             },

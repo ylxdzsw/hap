@@ -46,11 +46,13 @@ def run(global_rank, local_rank):
     result_times = []
     strat_time = last_iter_time = time.time()
     total_loss = 0
+
+    x, y = next(train_data)
+    x = x.cuda(local_rank)
+    y = y.cuda(local_rank)
+
     for iter in range(config.run_iter):
         optimizer.zero_grad()
-        x, y = next(train_data)
-        x = x.cuda(local_rank)
-        y = y.cuda(local_rank)
 
         with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
             loss = dmodel(x, y)
@@ -104,9 +106,9 @@ def run(global_rank, local_rank):
     if not config.trace:
         return
 
-    x, y = next(train_data)
-    x = x.cuda(local_rank)
-    y = y.cuda(local_rank)
+    # x, y = next(train_data)
+    # x = x.cuda(local_rank)
+    # y = y.cuda(local_rank)
     with profile(
         activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA],
         # record_shapes = True,
