@@ -24,11 +24,18 @@ class FlopsProfiler:
             loss.backward()
             optimizer.step()
             torch.cuda.synchronize()
-        total_flops = 0
-        for node in model.graph.nodes:
-            total_flops += node.meta.get('flops', 0)
-        print(f"Profiling finished. Total flops: {total_flops}, wall time: {wall_time.time}")
-        self.device_flops = math.floor(total_flops / wall_time.time)
+
+        for i, node in enumerate(model.graph.nodes):
+            node.meta['id'] = i
+
+        hetspmd.init()
+
+        flops = hetspmd.stat(model, {
+            "input_shape": config.input_shape()
+        })
+
+        print(f"Profiling finished. Total flops: {flops}, wall time: {wall_time.time}")
+        self.device_flops = math.floor(flops / wall_time.time)
         print(self.device_flops)
 
 class BandwidthProfiler:
@@ -131,9 +138,9 @@ if __name__ == '__main__':
         # save("bandwidth_profiler", profiler)
         raise SystemExit
 
-    assert config.world_size == 1
+    # assert config.world_size == 1
 
     model = symbolic_trace(config.get_model()).cuda(0)
     x, y = next(config.get_data()[1])
-    profiler = FlopsProfiler(model, x.cuda(0), y.cuda(0))
+    profiler = FlopsProfiler(model, x.cuda(0))
     # save("flops_profiler", profiler)

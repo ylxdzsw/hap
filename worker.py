@@ -24,15 +24,13 @@ def run(global_rank, local_rank):
 
     dgraph = hetspmd.main(model, {
         "input_shape": config.input_shape(),
-        "device_flops": [
-            config.profiler_data["device_flops"],
-        ] * config.world_size,
+        "device_flops": [ 5712013967207 ] * 2 + [ 3009904927648 ] * 2,
         "all_reduce_bandwidth": config.profiler_data["all_reduce"] / 1000,
         "all_gather_bandwidth": config.profiler_data["all_gather"],
         "reduce_scatter_bandwidth": config.profiler_data["reduce_scatter"],
         "all_to_all_bandwidth": config.profiler_data["all_to_all"],
         "rank": global_rank,
-        "sharding_ratios": [0.5, 0.5]
+        "sharding_ratios": [ 0.32745167869976854 ] * 2 + [ 0.17254832130023143 ] * 2,
     })
 
     # print(dgraph, flush=True)
@@ -54,8 +52,8 @@ def run(global_rank, local_rank):
     for iter in range(config.run_iter):
         optimizer.zero_grad()
 
-        with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
-            loss = dmodel(x, y)
+        with torch.autocast(device_type="cuda") if config.fp16 else nullcontext():
+            loss = dmodel(x)
 
         aggregated_loss = loss.detach().clone()
         dist.reduce(aggregated_loss, 0)
@@ -118,7 +116,7 @@ def run(global_rank, local_rank):
         for _ in range(15):
             with record_function("forward"):
                 with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
-                    loss = dmodel(x, y)
+                    loss = dmodel(x)
             with record_function("backward"):
                 loss.backward()
                 torch.cuda.synchronize()

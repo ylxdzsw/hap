@@ -5,37 +5,38 @@ import math
 rootpath = "/root/hetspmd"
 # sys.path.insert(1, f"{rootpath}/spmd")
 
-# model_name = "Tmlp"
+model_name = "Tmlp"
 # model_name = "Ttransformer"
-model_name = "Rtransformer"
+# model_name = "Rtransformer"
 # model_name = "Rmoe"
 # model_name = "Rswitch"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
 # model_name = "Vvgg"
 
-world_size = 2
-nlayers = 4
+world_size = 4
+nlayers = 2
 n_expert = 2 * world_size
-batch_size = 32 * world_size
-seqlen = 128
+batch_size = 8 * world_size
+seqlen = 64
 if model_name.startswith('V'):
     seqlen = 64
 capacity_factor = 1.25
 if model_name.endswith('moe'):
     capacity_factor *= 2
 capacity = math.ceil(seqlen / n_expert * capacity_factor)
-emsize = 768
-nhid = emsize * 4
+emsize = 768 * 28
+nhid = emsize * 2
 
 dropout = 0.1
-nheads = 12
+nheads = 8
 
-segmentation = True
-# segmentation = False
+# segmentation = True
+segmentation = False
 
-# master_addr = "10.28.1.30"
-master_addr = "127.0.0.1"
+master_addr = "10.28.1.30"
+# master_addr = "172.16.0.243"
+# master_addr = "127.0.0.1"
 master_port = 39264
 
 trace = True

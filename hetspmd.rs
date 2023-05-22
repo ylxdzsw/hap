@@ -2994,6 +2994,11 @@ impl ClusterInfo {
 
 // idea: if calculating it is time consuming, make a struct called sharding plan wraps the sharding ratios and caches the sharding_round results for each length
 fn sharding_round(full_length: usize, sharding_ratios: &[f64]) -> Vec<usize> {
+    // hack. Corresponding to the one in GetAttr
+    if full_length == 1 {
+        return vec![1; sharding_ratios.len()];
+    }
+
     let mut sharding_lengths: Vec<_> = sharding_ratios.iter().map(|x| (x * full_length as f64) as usize).collect();
     assert!(sharding_lengths.iter().sum::<usize>() <= full_length);
     while sharding_lengths.iter().sum::<usize>() < full_length {
@@ -3005,6 +3010,11 @@ fn sharding_round(full_length: usize, sharding_ratios: &[f64]) -> Vec<usize> {
 
         sharding_lengths[max_diff_index] += 1;
     }
+
+    if sharding_lengths.iter().any(|&x| x == 0) {
+        panic!("sharding length has 0: {} {:?} {:?}", full_length, sharding_ratios, sharding_lengths);
+    }
+
     sharding_lengths
 }
 
