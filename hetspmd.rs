@@ -1636,13 +1636,11 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         let py_weight_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 1)?;
         let py_bias_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 2)?;
 
-        let stride: (usize, usize) = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 3)?.extract(ctx.py)?;
+        let (sH, sW): (usize, usize) = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 3)?.extract(ctx.py)?;
         let padding: (usize, usize) = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 4)?.extract(ctx.py)?;
         let dilation: (usize, usize) = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 5)?.extract(ctx.py)?;
         let groups: usize = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 6)?.extract(ctx.py)?;
 
-        assert_eq!(stride, (1, 1));
-        assert_eq!(padding, (1, 1));
         assert_eq!(dilation, (1, 1));
         assert_eq!(groups, 1);
 
@@ -1662,13 +1660,16 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         let kH = ctx.graph[weight_tensor_id].shape[2];
         let kW = ctx.graph[weight_tensor_id].shape[3];
 
+        assert!(kH == sH && kW == sW);
+        assert!(H % sH == 0 && W % sW == 0);
+
         let op = Rc::new(Op {
             py_name: "torch.nn.functional.conv2d".to_string(),
             codegen: Box::new(move |py, graph, inputs, _shapes| {
                 let input = &inputs[0];
                 let weight = &inputs[1];
                 let bias = &inputs[2];
-                let args = (input, weight, bias, (1, 1), (1, 1), (1, 1), 1);
+                let args = (input, weight, bias, (sH, sW), padding, (1, 1), 1);
                 let output = graph.call_method(py, "call_function", (py.eval("torch.nn.functional.conv2d", None, None)?, args), None)?;
                 Ok(smallvec![output])
             }),
@@ -1684,7 +1685,7 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
             producer: node_id,
             consumers: smallvec![],
             segment_id: *ctx.current_segment,
-            shape: smallvec![N, O, H, W],
+            shape: smallvec![N, O, H / sH, W / sW],
             communicatable: true
         });
 
@@ -2015,6 +2016,104 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         Ok(())
     }
 
+    parsing_handlers.insert(py.eval("models.append_cls_token", None, None)?.as_ptr() as _, &handle_append_cls_token);
+    #[allow(non_snake_case)]
+    fn handle_append_cls_token(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_x_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "x")?;
+        let py_cls_token_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "cls_token")?;
+
+        let x_tensor_id = ctx.results[py_x_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let cls_token_tensor_id = ctx.results[py_cls_token_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        let N = ctx.graph[x_tensor_id].shape[0];
+        let S = ctx.graph[x_tensor_id].shape[1];
+        let H = ctx.graph[x_tensor_id].shape[2];
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let op = Rc::new(Op {
+            py_name: "models.append_cls_token".to_string(),
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
+                let x = &inputs[0];
+                let cls_token = &inputs[1];
+                let output = graph.call_method(py, "call_function", (py.eval("models.append_cls_token", None, None)?, (x, cls_token)), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                shapes[0][0].clone() * shapes[0][2].clone()
+            }),
+            info: BTreeMap::new()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: smallvec![N, S + 1, H],
+            communicatable: true
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![x_tensor_id, cls_token_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[x_tensor_id].consumers.push(node_id);
+        ctx.graph[cls_token_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
+
+    parsing_handlers.insert(py.eval("models.get_cls_token", None, None)?.as_ptr() as _, &handle_get_cls_token);
+    #[allow(non_snake_case)]
+    fn handle_get_cls_token(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_x_node = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "x")?;
+
+        let x_tensor_id = ctx.results[py_x_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        let N = ctx.graph[x_tensor_id].shape[0];
+        let H = ctx.graph[x_tensor_id].shape[2];
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let op = Rc::new(Op {
+            py_name: "models.get_cls_token".to_string(),
+            codegen: Box::new(move |py, graph, inputs, _shapes| {
+                let x = &inputs[0];
+                let output = graph.call_method(py, "call_function", (py.eval("models.get_cls_token", None, None)?, (x,)), None)?;
+                Ok(smallvec![output])
+            }),
+            flops: Box::new(|shapes| {
+                shapes[0][0].clone() * shapes[0][2].clone()
+            }),
+            info: BTreeMap::new()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: smallvec![N, H],
+            communicatable: true
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![x_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[x_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
 
 
 
@@ -2116,6 +2215,8 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
 
                 let tensor_class = py.eval("torch.Tensor", None, None)?;
                 let target_method = py_node.getattr(py, "target")?;
+
+                // eprintln!("call_method: {:?}", py_node.getattr(py, "target")?);
 
                 parsing_handlers[&(tensor_class.getattr(ctx.py, target_method)?.as_ptr() as _)](ctx, py_node)?;
             }
@@ -2881,6 +2982,53 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
             op.clone(),
         );
     });
+
+    // Append CLS Token
+    for_each_op!("models.append_cls_token", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        add_comp_triple(
+            smallvec![Property::gather(node.inputs[0], 0), Property::identity(node.inputs[1])],
+            smallvec![Property::gather(node.outputs[0], 0)],
+            op.clone(),
+        );
+
+        add_comp_triple(
+            smallvec![Property::gather(node.inputs[0], 2), Property::gather(node.inputs[1], 2)],
+            smallvec![Property::gather(node.outputs[0], 2)],
+            op.clone(),
+        );
+    });
+
+    // Get CLS Token
+    for_each_op!("models.get_cls_token", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        add_comp_triple(
+            smallvec![Property::gather(node.inputs[0], 0)],
+            smallvec![Property::gather(node.outputs[0], 0)],
+            op.clone(),
+        );
+
+        add_comp_triple(
+            smallvec![Property::gather(node.inputs[0], 2)],
+            smallvec![Property::gather(node.outputs[0], 1)],
+            op.clone(),
+        );
+    });
+
+
+
+
+
 
     triples
 }

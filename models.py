@@ -142,7 +142,7 @@ class RSwitch(torch.nn.Module):
         return self.criterion(x.transpose(1, 2), y) # the input to NLL loss is (N, C, ...), so we move the class prediction to the second dimension
 
 class VTransformer(torch.nn.Module):
-    def __init__(self, nclasses, seqlen, emsize=2048, nheads=4, nhid=2048, dropout=0.2, nlayers=2):
+    def __init__(self, nclasses, seqlen, emsize=2048, nheads=4, nhid=2048, dropout=0.2, nlayers=2, segmentation=True):
         super().__init__()
         self.emsize = emsize
         self.criterion = torch.nn.NLLLoss(reduction='sum')
@@ -155,6 +155,7 @@ class VTransformer(torch.nn.Module):
 
         self.layers = torch.nn.ModuleList([ torch.nn.TransformerEncoderLayer(emsize, nheads, nhid, dropout, batch_first=True) for _ in range(nlayers) ])
         self.decoder = torch.nn.Linear(emsize, nclasses)
+        self.segmentation = segmentation
 
     def forward(self, x, y):
         # x: N, 3, 32, 32
@@ -164,6 +165,8 @@ class VTransformer(torch.nn.Module):
 
         for layer in self.layers:
             x = layer(x)
+            if self.segmentation:
+                x = new_segment(x)
 
         x = get_cls_token(x) # embedding of the class token
         x = self.decoder(x)
@@ -518,7 +521,7 @@ class PatchEmbed(torch.nn.Module):
         # B, C, H, W = x.shape
         # assert H == self.img_size[0] and W == self.img_size[1]
         x = self.proj(x)
-        x = x.flatten(2).transpose(1, 2)  # BCHW -> BNC
+        x = torch.flatten(x, 2).transpose(1, 2)  # BCHW -> BNC
         return x
 
 # TODO: make it accepting multiple arguments?
