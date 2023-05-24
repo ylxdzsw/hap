@@ -15,7 +15,7 @@ from utils import *
 
 def run(global_rank, local_rank):
     import torch.distributed as dist
-    dist.init_process_group('nccl', rank=global_rank, timeout=datetime.timedelta(hours=2))
+    dist.init_process_group('nccl', rank=global_rank)
 
     model = config.get_model(seed=39).cuda(local_rank)
     dmodel = DDP(model, device_ids=[local_rank])
@@ -28,13 +28,14 @@ def run(global_rank, local_rank):
     strat_time = last_iter_time = time.time()
     total_loss = 0
 
-
     x, y = next(train_data)
-    sharding_lengths = [1] * config.world_size
-    sharding_lengths = [ x / sum(sharding_lengths) for x in sharding_lengths]
+    sharding_lengths = [ 1 ] * config.world_size
+    # sharding_lengths = [ 3858755112937 ] * round(config.world_size / 8 * 2) + [ 2149250936815 ] * round(config.world_size / 8 * 6)
+    sharding_lengths = [ s / sum(sharding_lengths) for s in sharding_lengths]
     hetspmd.sharding_round(x.shape[0], sharding_lengths)
-    x = x.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
-    y = y.chunk(config.world_size, 0)[global_rank].cuda(local_rank)
+    print(sharding_lengths, flush=True)
+    x = x.split(sharding_lengths, 0)[global_rank].cuda(local_rank)
+    y = y.split(sharding_lengths, 0)[global_rank].cuda(local_rank)
 
     for iter in range(config.run_iter):
         optimizer.zero_grad()
@@ -61,7 +62,7 @@ def run(global_rank, local_rank):
             result_times.append(iter_duration)
             last_iter_time += iter_duration
             print("iter time: ", iter_duration)
-            print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
+            print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]), flush=True)
 
     if not config.trace:
         return

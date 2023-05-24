@@ -1660,7 +1660,6 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         let kH = ctx.graph[weight_tensor_id].shape[2];
         let kW = ctx.graph[weight_tensor_id].shape[3];
 
-        assert!(kH == sH && kW == sW);
         assert!(H % sH == 0 && W % sW == 0);
 
         let op = Rc::new(Op {
@@ -2115,6 +2114,185 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         Ok(())
     }
 
+    parsing_handlers.insert(py.eval("models.top_2_gating", None, None)?.as_ptr() as _, &handle_top_2_gating);
+    #[allow(non_snake_case)]
+    fn handle_top_2_gating(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let py_gate_input_node =  py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "gate_input")?;
+        let py_gate_weight_node =  py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "gate_weight")?;
+        let n_expert: usize = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "n_expert")?.extract(ctx.py)?;
+        let capacity: usize = py_node.getattr(ctx.py, "kwargs")?.get_item(ctx.py, "capacity")?.extract(ctx.py)?;
+
+        let gate_input_tensor_id = ctx.results[py_gate_input_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let gate_weight_tensor_id = ctx.results[py_gate_weight_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let B = ctx.graph[gate_input_tensor_id].shape[0];
+        let S = ctx.graph[gate_input_tensor_id].shape[1];
+        let D = ctx.graph[gate_input_tensor_id].shape[2];
+
+        assert_eq!(ctx.graph[gate_weight_tensor_id].shape[0], D);
+        assert_eq!(ctx.graph[gate_weight_tensor_id].shape[1], n_expert);
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let dispatch_tensor_id = RTensorId(ctx.graph.tensors.len());
+        let combine_tensor_id = dispatch_tensor_id + 1;
+
+        let op = Rc::new(Op {
+            py_name: "models.top_2_gating".to_string(),
+            codegen: Box::new(move |py, graph, inputs, shapes| {
+                let gate_input = &inputs[0];
+                let gate_weight = &inputs[1];
+                let outputs = graph.call_method(py, "call_function", (py.eval("models.top_2_gating", None, None)?, (gate_input, n_expert, capacity, gate_weight)), None)?;
+                let output1 = graph.call_method(py, "call_function", (py.eval("operator.getitem", None, None)?, (&outputs, 0), PyNone), None)?;
+                let output2 = graph.call_method(py, "call_function", (py.eval("operator.getitem", None, None)?, (&outputs, 1), PyNone), None)?;
+                Ok(smallvec![output1, output2])
+            }),
+            flops: Box::new(|shapes| {
+                10. * shapes[0].iter().cloned().product::<Expression>()
+            }),
+            info: BTreeMap::new(),
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: smallvec![B, S, n_expert, capacity],
+            communicatable: true
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: smallvec![B, S, n_expert, capacity],
+            communicatable: true
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![gate_input_tensor_id, gate_weight_tensor_id],
+            outputs: smallvec![dispatch_tensor_id, combine_tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[gate_input_tensor_id].consumers.push(node_id);
+        ctx.graph[gate_weight_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tuple(smallvec![dispatch_tensor_id, combine_tensor_id]));
+        Ok(())
+    }
+
+    parsing_handlers.insert(py.eval("torch.einsum", None, None)?.as_ptr() as _, &handle_einsum);
+    #[allow(non_snake_case)]
+    fn handle_einsum(ctx: ParserContext, py_node: PyObject) -> PyResult<()> {
+        let py_id: usize = py_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract(ctx.py)?;
+
+        let code: String = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 0)?.extract(ctx.py)?;
+        let py_x_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 1)?;
+        let py_y_node = py_node.getattr(ctx.py, "args")?.get_item(ctx.py, 2)?;
+
+        let x_tensor_id = ctx.results[py_x_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+        let y_tensor_id = ctx.results[py_y_node.getattr(ctx.py, "meta")?.get_item(ctx.py, "id")?.extract::<usize>(ctx.py)?].as_ref().unwrap().as_tensor();
+
+        let x_shape = &ctx.graph[x_tensor_id].shape;
+        let y_shape = &ctx.graph[y_tensor_id].shape;
+
+        let output_shape: Shape = match &code[..] {
+            "bsd,bsec->becd" => {
+                smallvec![
+                    x_shape[0],
+                    y_shape[2],
+                    y_shape[3],
+                    x_shape[2],
+                ]
+            }
+            "edh,becd->bech" => {
+                smallvec![
+                    y_shape[0],
+                    y_shape[1],
+                    y_shape[2],
+                    x_shape[2],
+                ]
+            }
+            "ehd,bech->becd" => {
+                smallvec![
+                    y_shape[0],
+                    y_shape[1],
+                    y_shape[2],
+                    x_shape[2],
+                ]
+            }
+            "becd,bsec->bsd" => {
+                smallvec![
+                    x_shape[0],
+                    y_shape[1],
+                    x_shape[3],
+                ]
+            }
+            _ => unreachable!()
+        };
+
+        let node_id = RNodeId(ctx.graph.nodes.len());
+        let tensor_id = RTensorId(ctx.graph.tensors.len());
+
+        let op = Rc::new(Op {
+            py_name: "torch.einsum".to_string(),
+            codegen: Box::new({
+                let code = code.clone();
+                move |py, graph, inputs, _shapes| {
+                    let x = &inputs[0];
+                    let y = &inputs[1];
+                    let output = graph.call_method(py, "call_function", (py.eval("torch.einsum", None, None)?, (code.clone(), x, y)), None)?;
+                    Ok(smallvec![output])
+                }
+            }),
+            flops: Box::new({
+                let code = code.clone();
+                move |shapes| {
+                    let x_shape = &shapes[0];
+                    let y_shape = &shapes[1];
+
+                    match &code[..] {
+                        "bsd,bsec->becd" => 3. * x_shape[0].clone() * x_shape[1].clone() * x_shape[2].clone() * y_shape[2].clone() * y_shape[3].clone(),
+                        "edh,becd->bech" => 3. * x_shape[0].clone() * x_shape[1].clone() * x_shape[2].clone() * y_shape[0].clone() * y_shape[2].clone(),
+                        "ehd,bech->becd" => 3. * x_shape[0].clone() * x_shape[1].clone() * x_shape[2].clone() * y_shape[0].clone() * y_shape[2].clone(),
+                        "becd,bsec->bsd" => 3. * x_shape[0].clone() * x_shape[1].clone() * x_shape[2].clone() * x_shape[3].clone() * y_shape[1].clone(),
+                        _ => unreachable!()
+                    }
+                }
+            }),
+            info: [("code".to_string(), code)].into_iter().collect()
+        });
+
+        ctx.graph.tensors.push(RTensor {
+            producer: node_id,
+            consumers: smallvec![],
+            segment_id: *ctx.current_segment,
+            shape: output_shape,
+            communicatable: true
+        });
+
+        ctx.graph.nodes.push(RNode {
+            inputs: smallvec![x_tensor_id, y_tensor_id],
+            outputs: smallvec![tensor_id],
+            instruction: RInstruction::Op(op)
+        });
+
+        ctx.graph[x_tensor_id].consumers.push(node_id);
+        ctx.graph[y_tensor_id].consumers.push(node_id);
+        ctx.results[py_id] = Some(EvalResult::Tensor(tensor_id));
+        Ok(())
+    }
+
+
+
+
+
+
+
 
 
     Ok(parsing_handlers)
@@ -2200,7 +2378,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                     results: &mut results
                 };
 
-                // eprintln!("call_function: {:?}", py_node.getattr(py, "target")?);
+                eprintln!("call_function: {:?}", py_node.getattr(py, "target")?);
 
                 parsing_handlers[&(py_node.getattr(py, "target")?.as_ptr() as _)](ctx, py_node)?;
             },
@@ -2216,7 +2394,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                 let tensor_class = py.eval("torch.Tensor", None, None)?;
                 let target_method = py_node.getattr(py, "target")?;
 
-                // eprintln!("call_method: {:?}", py_node.getattr(py, "target")?);
+                eprintln!("call_method: {:?}", py_node.getattr(py, "target")?);
 
                 parsing_handlers[&(tensor_class.getattr(ctx.py, target_method)?.as_ptr() as _)](ctx, py_node)?;
             }
@@ -2399,6 +2577,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     move |ctx| {
                         let py_input = ctx.get_property_implementation(Property::gather(tensor_id, dim));
                         let py_result = ctx.fx_call_function("collectives.all_gather", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
+                        // let py_result = ctx.fx_call_function("collectives.all_gather_by_group_call", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
                         ctx.set_property_implementation(Property::identity(tensor_id), py_result);
                         Ok(())
                     }
@@ -2436,6 +2615,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     move |ctx| {
                         let py_input = ctx.get_property_implementation(Property::reduce(tensor_id));
                         let py_result = ctx.fx_call_function("collectives.reduce_scatter", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
+                        // let py_result = ctx.fx_call_function("collectives.reduce_scatter_by_group_call", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
                         ctx.set_property_implementation(Property::gather(tensor_id, dim), py_result);
                         Ok(())
                     }
@@ -3025,6 +3205,157 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
         );
     });
 
+    // Top 2 Gating
+    for_each_op!("models.top_2_gating", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        add_comp_triple(
+            smallvec![Property::gather(node.inputs[0], 0), Property::identity(node.inputs[1])],
+            smallvec![Property::gather(node.outputs[0], 0), Property::gather(node.outputs[1], 0)],
+            op.clone(),
+        );
+    });
+
+    // Einsum
+    for_each_op!("torch.einsum", |node, op| {
+        add_comp_triple(
+            node.inputs.iter().cloned().map(Property::identity).collect(),
+            node.outputs.iter().cloned().map(Property::identity).collect(),
+            op.clone(),
+        );
+
+        match &op.info["code"][..] {
+            "bsd,bsec->becd" => {
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 0), Property::gather(node.inputs[1], 0)],
+                    smallvec![Property::gather(node.outputs[0], 0)],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 1), Property::gather(node.inputs[1], 1)],
+                    smallvec![Property::reduce(node.outputs[0])],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 2), Property::identity(node.inputs[1])],
+                    smallvec![Property::gather(node.outputs[0], 3)],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::identity(node.inputs[0]), Property::gather(node.inputs[1], 2)],
+                    smallvec![Property::gather(node.outputs[0], 1)],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::identity(node.inputs[0]), Property::gather(node.inputs[1], 3)],
+                    smallvec![Property::gather(node.outputs[0], 2)],
+                    op.clone()
+                );
+            }
+            "edh,becd->bech" => {
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 0), Property::gather(node.inputs[1], 1)],
+                    smallvec![Property::gather(node.outputs[0], 1)],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 1), Property::gather(node.inputs[1], 3)],
+                    smallvec![Property::reduce(node.outputs[0])],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 2), Property::identity(node.inputs[1])],
+                    smallvec![Property::gather(node.outputs[0], 3)],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::identity(node.inputs[0]), Property::gather(node.inputs[1], 0)],
+                    smallvec![Property::gather(node.outputs[0], 0)],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::identity(node.inputs[0]), Property::gather(node.inputs[1], 2)],
+                    smallvec![Property::gather(node.outputs[0], 2)],
+                    op.clone()
+                );
+            }
+            "ehd,bech->becd" => {
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 0), Property::gather(node.inputs[1], 1)],
+                    smallvec![Property::gather(node.outputs[0], 1)],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 1), Property::gather(node.inputs[1], 3)],
+                    smallvec![Property::reduce(node.outputs[0])],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 2), Property::identity(node.inputs[1])],
+                    smallvec![Property::gather(node.outputs[0], 3)],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::identity(node.inputs[0]), Property::gather(node.inputs[1], 0)],
+                    smallvec![Property::gather(node.outputs[0], 0)],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::identity(node.inputs[0]), Property::gather(node.inputs[1], 2)],
+                    smallvec![Property::gather(node.outputs[0], 2)],
+                    op.clone()
+                );
+            }
+            "becd,bsec->bsd" => {
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 0), Property::gather(node.inputs[1], 0)],
+                    smallvec![Property::gather(node.outputs[0], 0)],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 1), Property::gather(node.inputs[1], 2)],
+                    smallvec![Property::reduce(node.outputs[0])],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 2), Property::gather(node.inputs[1], 3)],
+                    smallvec![Property::reduce(node.outputs[0])],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::gather(node.inputs[0], 3), Property::identity(node.inputs[1])],
+                    smallvec![Property::gather(node.outputs[0], 2)],
+                    op.clone()
+                );
+
+                add_comp_triple(
+                    smallvec![Property::identity(node.inputs[0]), Property::gather(node.inputs[1], 2)],
+                    smallvec![Property::gather(node.outputs[0], 1)],
+                    op.clone()
+                );
+            }
+            _ => unreachable!()
+        }
+    });
 
 
 

@@ -7,18 +7,18 @@ rootpath = "/root/hetspmd"
 
 # model_name = "Tmlp"
 # model_name = "Ttransformer"
-model_name = "Rtransformer"
-# model_name = "Rmoe"
+# model_name = "Rtransformer"
+model_name = "Rmoe"
 # model_name = "Rswitch"
 # model_name = "Vtransformer"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
 # model_name = "Vvgg"
 
-world_size = 4
+world_size = 8
 nlayers = 8
 n_expert = 2 * world_size
-batch_size = 8 * world_size
+batch_size = 32 * world_size
 seqlen = 128
 if model_name.startswith('V'):
     seqlen = 64
@@ -35,13 +35,14 @@ nheads = 12
 # segmentation = True
 segmentation = False
 
-# master_addr = "10.28.1.30"
-master_addr = "172.16.0.243"
+# master_addr = "10.28.1.30" # g15
+master_addr = "172.16.0.243" # v1
+# master_addr = "172.16.0.251" # p1
 # master_addr = "127.0.0.1"
-master_port = 39264
+master_port = 39265
 
-trace = True
-# trace = False
+# trace = True
+trace = False
 
 # use_hints = True
 use_hints = False
@@ -54,18 +55,12 @@ profile_noise = 0
 
 lr = 5e-4
 
-run_iter = 50
+run_iter = 30
 avg_iter = 20
-log_iter = 20
+log_iter = 30
 
 # fp16 = True
 fp16 = False
-
-if os.environ.get("CPN", "") != "":
-    cards_per_node = int(os.environ["CPN"])
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, range(cards_per_node)))
-    offset = int(os.environ["NODERANK"]) * cards_per_node
-    sys.argv.append(",".join(str(offset + i) for i in range(cards_per_node)))
 
 def get_model(seed=None):
     import models
@@ -139,8 +134,8 @@ def cifar10():
         loader = torch.utils.data.DataLoader(data, batch_size=batch_size, drop_last=True)
         while True:
             yield from iter(loader)
-    train_data = torchvision.datasets.CIFAR10(f"{rootpath}/cifar10", train=True, transform=torchvision.transforms.ToTensor(), download=True)
-    test_data = torchvision.datasets.CIFAR10(f"{rootpath}/cifar10", train=False, transform=torchvision.transforms.ToTensor(), download=True)
+    train_data = torchvision.datasets.CIFAR10(f"{rootpath}/cifar10", train=True, transform=torchvision.transforms.ToTensor()) #, download=True
+    test_data = torchvision.datasets.CIFAR10(f"{rootpath}/cifar10", train=False, transform=torchvision.transforms.ToTensor()) #, download=True
     return 10, it(train_data), it(test_data)
 
 def input_shape():
@@ -150,13 +145,3 @@ def input_shape():
         return { 'x': (batch_size, 3, 32, 32), 'y': (batch_size,) }
     if model_name.startswith('T'):
         return { 'x': (batch_size, seqlen, emsize), 'y': (batch_size,) }
-
-profiler_data = {
-    "n_devices": world_size,
-
-    "device_flops": 4139214925014,
-
-    # 'all_gather': 1224592728, 'all_reduce': 611692856, 'reduce_scatter': 1130230706, 'all_to_all': 10701240728,
-    # 'all_gather': 7429968322//2, 'all_reduce': 4421821530//2, 'reduce_scatter': 7537901123//2, 'all_to_all': 25451035500//2
-    'all_gather': 44984891222, 'all_gather_by_group_call': 67835491296, 'all_reduce': 82652529708, 'reduce_scatter': 44487643835, 'reduce_scatter_by_group_call': 73179489070, 'all_to_all': 163615224737
-}

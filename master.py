@@ -23,20 +23,26 @@ flops = hetspmd.stat(model, {
 
 print("Total flops:", flops, flush=True)
 
-dgraph = hetspmd.main(model, {
-    "input_shape": config.input_shape(),
-    "device_flops": [
-        config.profiler_data["device_flops"],
-        config.profiler_data["device_flops"],
-        config.profiler_data["device_flops"] * 0.5,
-        config.profiler_data["device_flops"] * 0.5,
-    ],
-    "all_reduce_bandwidth": config.profiler_data["all_reduce"],
-    "all_gather_bandwidth": config.profiler_data["all_gather"],
-    "reduce_scatter_bandwidth": config.profiler_data["reduce_scatter"],
-    "all_to_all_bandwidth": config.profiler_data["all_to_all"],
-    "rank": 0
-})
+with measure_time() as wall_time:
+    dgraph = hetspmd.main(model, {
+        "input_shape": config.input_shape(),
+        "device_flops": [ 3858755112937 ] * round(config.world_size / 8 * 2) + [ 2149250936815 ] * round(config.world_size / 8 * 6),
+        "all_gather_bandwidth": 815418707,
+        "all_gather_by_group_call_bandwidth": 549828906,
+        "all_reduce_bandwidth": 476774816,
+        "reduce_scatter_bandwidth": 876490907,
+        "reduce_scatter_by_group_call_bandwidth": 512358434,
+        "all_to_all_bandwidth": 7504501871,
+        "rank": 0,
+    })
+
+print(flush=True)
+print(flush=True)
+print(flush=True)
+print(flush=True)
+print(flush=True)
+print(flush=True)
+print(wall_time, flush=True)
 
 # print(dgraph, flush=True)
 

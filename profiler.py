@@ -128,7 +128,7 @@ def _run_collective_worker(op, size: int, skewness: float, queue, global_rank: i
 if __name__ == '__main__':
     if len(argv) >= 2:
         ranks = [ int(x) for x in argv[1].split(',') ]
-        skewness = float(argv[2])
+        skewness = 1 # float(argv[2])
 
         # if torch.cuda.device_count() != len(ranks):
         #     print("forget to set CUDA_VISIBLE_DEVICES")
@@ -142,5 +142,5 @@ if __name__ == '__main__':
 
     model = symbolic_trace(config.get_model()).cuda(0)
     x, y = next(config.get_data()[1])
-    profiler = FlopsProfiler(model, x.cuda(0))
+    profiler = FlopsProfiler(model, x.cuda(0), y.cuda(0))
     # save("flops_profiler", profiler)

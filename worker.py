@@ -13,7 +13,7 @@ from utils import *
 
 def run(global_rank, local_rank):
     import torch.distributed as dist
-    dist.init_process_group('nccl', rank=global_rank, timeout=datetime.timedelta(hours=2))
+    dist.init_process_group('nccl', rank=global_rank)
 
     model = symbolic_trace(config.get_model(seed=39))
 
@@ -24,13 +24,16 @@ def run(global_rank, local_rank):
 
     dgraph = hetspmd.main(model, {
         "input_shape": config.input_shape(),
-        "device_flops": [ 5712013967207 ] * 2 + [ 3009904927648 ] * 2,
-        "all_reduce_bandwidth": config.profiler_data["all_reduce"] / 1000,
-        "all_gather_bandwidth": config.profiler_data["all_gather"],
-        "reduce_scatter_bandwidth": config.profiler_data["reduce_scatter"],
-        "all_to_all_bandwidth": config.profiler_data["all_to_all"],
+        # "device_flops": [ 3858755112937 ] * round(config.world_size / 8 * 2) + [ 2149250936815 ] * round(config.world_size / 8 * 6),
+        "device_flops": [ 2149250936815 ] * config.world_size,
+        "all_gather_bandwidth": 815418707,
+        "all_gather_by_group_call_bandwidth": 549828906,
+        "all_reduce_bandwidth": 476774816,
+        "reduce_scatter_bandwidth": 876490907,
+        "reduce_scatter_by_group_call_bandwidth": 512358434,
+        "all_to_all_bandwidth": 7504501871,
         "rank": global_rank,
-        "sharding_ratios": [ 0.32745167869976854 ] * 2 + [ 0.17254832130023143 ] * 2,
+        # "sharding_ratios": [ 0.32745167869976854 ] * 2 + [ 0.17254832130023143 ] * 2,
     })
 
     # print(dgraph, flush=True)
@@ -75,7 +78,7 @@ def run(global_rank, local_rank):
             result_times.append(iter_duration)
             last_iter_time += iter_duration
             print("iter time: ", iter_duration)
-            print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
+            print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]), flush=True)
 
     # for epoch in range(config.epoch):
     #     total_loss = 0.
