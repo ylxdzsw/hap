@@ -2,3 +2,4 @@
 Cargo.lock
 run
 runall
+run_deepspeed

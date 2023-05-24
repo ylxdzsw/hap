@@ -3,19 +3,19 @@ import sys
 import math
 
 rootpath = "/root/hetspmd"
-# sys.path.insert(1, f"{rootpath}/spmd")
+sys.path.insert(1, rootpath) # for deepspeed
 
 # model_name = "Tmlp"
 # model_name = "Ttransformer"
 # model_name = "Rtransformer"
-model_name = "Rmoe"
+# model_name = "Rmoe"
 # model_name = "Rswitch"
-# model_name = "Vtransformer"
+model_name = "Vtransformer"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
 # model_name = "Vvgg"
 
-world_size = 32
+world_size = 64
 nlayers = 8
 n_expert = 2 * world_size
 batch_size = 32 * world_size
@@ -36,8 +36,8 @@ nheads = 12
 segmentation = False
 
 # master_addr = "10.28.1.30" # g15
-# master_addr = "172.16.0.243" # v1
-master_addr = "172.16.0.251" # p1
+master_addr = "172.16.0.243" # v1
+# master_addr = "172.16.0.251" # p1
 # master_addr = "127.0.0.1"
 master_port = 39265
 
@@ -61,6 +61,8 @@ log_iter = 30
 
 # fp16 = True
 fp16 = False
+
+cards_per_node=8 # used by DeepSpeed script
 
 def get_model(seed=None):
     import models
