@@ -15,7 +15,7 @@ model_name = "Rmoe"
 # model_name = "Vswitch"
 # model_name = "Vvgg"
 
-world_size = 8
+world_size = 32
 nlayers = 8
 n_expert = 2 * world_size
 batch_size = 32 * world_size
@@ -36,8 +36,8 @@ nheads = 12
 segmentation = False
 
 # master_addr = "10.28.1.30" # g15
-master_addr = "172.16.0.243" # v1
-# master_addr = "172.16.0.251" # p1
+# master_addr = "172.16.0.243" # v1
+master_addr = "172.16.0.251" # p1
 # master_addr = "127.0.0.1"
 master_port = 39265
 

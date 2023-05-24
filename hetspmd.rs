@@ -2378,7 +2378,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                     results: &mut results
                 };
 
-                eprintln!("call_function: {:?}", py_node.getattr(py, "target")?);
+                // eprintln!("call_function: {:?}", py_node.getattr(py, "target")?);
 
                 parsing_handlers[&(py_node.getattr(py, "target")?.as_ptr() as _)](ctx, py_node)?;
             },
@@ -2394,7 +2394,7 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
                 let tensor_class = py.eval("torch.Tensor", None, None)?;
                 let target_method = py_node.getattr(py, "target")?;
 
-                eprintln!("call_method: {:?}", py_node.getattr(py, "target")?);
+                // eprintln!("call_method: {:?}", py_node.getattr(py, "target")?);
 
                 parsing_handlers[&(tensor_class.getattr(ctx.py, target_method)?.as_ptr() as _)](ctx, py_node)?;
             }
