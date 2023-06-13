@@ -2,6 +2,7 @@
 #![allow(non_upper_case_globals)]
 #![feature(let_chains)]
 
+use std::io::Write;
 use std::iter::Product;
 use std::ops::{Index, IndexMut, Add, Mul, Div};
 use std::rc::Rc;
@@ -19,9 +20,7 @@ type Dimension = u8;
 type Shape = SVec<usize, 4>;
 type SymbolicShape = SVec<Expression, 4>;
 
-static CTRLC_TRAPPED: AtomicBool = AtomicBool::new(false);
-static CTRLC_RECEIVED: AtomicBool = AtomicBool::new(false);
-
+static ctrlc_received: AtomicBool = AtomicBool::new(false);
 static init_script: &str = r#"
 import collectives
 import operator
@@ -46,17 +45,37 @@ def split_param_or_buffer(graph_module, target, sharding_lengths, dim, rank):
         return
 
     p.data = torch.split(p.data, sharding_lengths, dim)[rank]
+
+def symbolic_trace(module):
+    import torch.fx
+    class Tracer(torch.fx.Tracer):
+        def is_leaf_module(*_): return False
+
+    graph = Tracer().trace(module)
+    graph.eliminate_dead_code()
+    model = torch.fx.graph_module.GraphModule(module, graph)
+
+    from torch.fx.experimental.normalize import NormalizeArgs, NormalizeOperators
+    model = NormalizeArgs(model).transform()
+    model = NormalizeOperators(model).transform()
+
+    for i, node in enumerate(model.graph.nodes):
+        node.meta['id'] = i
+
+    return model
 "#;
 
-cpython::py_module_initializer!(hetspmd, |py, m| {
-    if !CTRLC_TRAPPED.load(std::sync::atomic::Ordering::Relaxed) {
-        ctrlc::set_handler(|| {
-            CTRLC_RECEIVED.store(true, std::sync::atomic::Ordering::Relaxed)
-        }).unwrap();
-    }
+cpython::py_module_initializer!(hap, |py, m| {
+    ctrlc::set_handler(|| {
+        ctrlc_received.store(true, std::sync::atomic::Ordering::Relaxed)
+    }).unwrap();
 
-    m.add(py, "init", cpython::py_fn!(py, py_init() -> PyResult<PyNone> {
-        py.run(init_script, None, None).map(|_| PyNone)
+    py.run(init_script, None, None).map(|_| PyNone);
+
+    // eprintln!("Hap initialized!");
+
+    m.add(py, "trace", cpython::py_fn!(py, py_trace(py_module: PyObject) -> PyResult<PyObject> {
+        py.eval("symbolic_trace", None, None)?.call(py, PyTuple::new(py, &[py_module]), None)
     }))?;
 
     m.add(py, "main", cpython::py_fn!(py, py_main(py_graph_module: PyObject, py_config: PyObject) -> PyResult<PyObject> {
@@ -705,7 +724,7 @@ fn a_star(ctx: &AStarContext, initial_properties: &[Property], profiler: &Profil
     let mut ticker = Ticker::new(5000);
 
     while let Some(ProgramHeapEntry { program, .. }) = heap.pop() {
-        if CTRLC_RECEIVED.load(std::sync::atomic::Ordering::Relaxed) {
+        if ctrlc_received.load(std::sync::atomic::Ordering::Relaxed) {
             panic!("interupted")
         }
 

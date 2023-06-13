@@ -5,24 +5,21 @@ import time
 import torch
 import torch.fx
 from torch.profiler import profile, record_function, ProfilerActivity
-from contextlib import nullcontext
 import numpy as np
-import hetspmd
 
-from utils import *
+def eprint(*args, **kwargs):
+    import sys
+    print(*args, file=sys.stderr, **kwargs)
 
 def run(global_rank, local_rank):
+    import hap
+
     import torch.distributed as dist
     dist.init_process_group('nccl', rank=global_rank)
 
-    model = symbolic_trace(config.get_model(seed=39))
+    model = hap.trace(config.get_model(seed=39))
 
-    for i, node in enumerate(model.graph.nodes):
-        node.meta['id'] = i
-
-    hetspmd.init()
-
-    dgraph = hetspmd.main(model, {
+    dgraph = hap.main(model, {
         "input_shape": config.input_shape(),
         # "device_flops": [ 3858755112937 ] * round(config.world_size / 8 * 2) + [ 2149250936815 ] * round(config.world_size / 8 * 6),
         "device_flops": [ 2149250936815 ] * config.world_size,
@@ -36,7 +33,7 @@ def run(global_rank, local_rank):
         # "sharding_ratios": [ 0.32745167869976854 ] * 2 + [ 0.17254832130023143 ] * 2,
     })
 
-    # print(dgraph, flush=True)
+    # eprint(dgraph)
 
     dmodel = torch.fx.GraphModule(model, dgraph).cuda(local_rank)
     del model
@@ -55,8 +52,7 @@ def run(global_rank, local_rank):
     for iter in range(config.run_iter):
         optimizer.zero_grad()
 
-        with torch.autocast(device_type="cuda") if config.fp16 else nullcontext():
-            loss = dmodel(x, y)
+        loss = dmodel(x, y)
 
         aggregated_loss = loss.detach().clone()
         dist.reduce(aggregated_loss, 0)
@@ -64,7 +60,7 @@ def run(global_rank, local_rank):
         if global_rank == 0:
             total_loss += aggregated_loss.cpu().numpy() / config.batch_size / config.seqlen
             if iter % config.log_iter == 0:
-                print(f"loss (log ppl) {iter}: {total_loss / config.log_iter:.3f}, wall clock: {time.time() - strat_time:.3f}")
+                eprint(f"loss (log ppl) {iter}: {total_loss / config.log_iter:.3f}, wall clock: {time.time() - strat_time:.3f}")
                 total_loss = 0
         # dist.barrier(device_ids=[global_rank])
 
@@ -77,8 +73,8 @@ def run(global_rank, local_rank):
             iter_duration = time.time() - last_iter_time
             result_times.append(iter_duration)
             last_iter_time += iter_duration
-            print("iter time: ", iter_duration)
-            print("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]), flush=True)
+            eprint("iter time: ", iter_duration)
+            eprint("avg±std:", np.mean(result_times[-config.avg_iter:]), np.std(result_times[-config.avg_iter:]))
 
     # for epoch in range(config.epoch):
     #     total_loss = 0.
@@ -95,7 +91,7 @@ def run(global_rank, local_rank):
     #             if global_rank == 0:
     #                 avg_loss = total_loss / config.log_iterval
     #                 elapsed = time.time() - start_time
-    #                 print(f"epoch {epoch:3d} | batch {batch:3d} | ppl {math.exp(avg_loss):02.2f} | ms/batch {elapsed*1000/config.log_iterval:5.2f}")
+    #                 eprint(f"epoch {epoch:3d} | batch {batch:3d} | ppl {math.exp(avg_loss):02.2f} | ms/batch {elapsed*1000/config.log_iterval:5.2f}")
     #             total_loss = 0.
     #             start_time = time.time()
 
@@ -118,8 +114,7 @@ def run(global_rank, local_rank):
     ) as prof:
         for _ in range(15):
             with record_function("forward"):
-                with torch.autocast(device_type="cuda") if config.fp16 else nullcontext() :
-                    loss = dmodel(x, y)
+                loss = dmodel(x, y)
             with record_function("backward"):
                 loss.backward()
                 torch.cuda.synchronize()
@@ -129,14 +124,14 @@ def run(global_rank, local_rank):
             prof.step()
 
     if local_rank == 0:
-        # print(prof.key_averages().table(sort_by="cuda_time_total"))
+        # eprint(prof.key_averages().table(sort_by="cuda_time_total"))
         prof.export_chrome_trace("trace.json")
 
 if __name__ == '__main__':
     ranks = [ int(x) for x in sys.argv[1].split(',') ]
 
     # if torch.cuda.device_count() != len(ranks):
-    #     print("forget to set CUDA_VISIBLE_DEVICES")
+    #     eprint("forget to set CUDA_VISIBLE_DEVICES")
     #     raise SystemExit
 
     import os

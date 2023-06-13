@@ -7,7 +7,7 @@ import torch.fx
 from torch.profiler import profile, record_function, ProfilerActivity
 from contextlib import nullcontext
 import numpy as np
-import hetspmd
+import hap
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -32,7 +32,7 @@ def run(global_rank, local_rank):
     sharding_lengths = [ 1 ] * config.world_size
     # sharding_lengths = [ 3858755112937 ] * round(config.world_size / 8 * 2) + [ 2149250936815 ] * round(config.world_size / 8 * 6)
     sharding_lengths = [ s / sum(sharding_lengths) for s in sharding_lengths]
-    hetspmd.sharding_round(x.shape[0], sharding_lengths)
+    hap.sharding_round(x.shape[0], sharding_lengths)
     print(sharding_lengths, flush=True)
     x = x.split(sharding_lengths, 0)[global_rank].cuda(local_rank)
     y = y.split(sharding_lengths, 0)[global_rank].cuda(local_rank)

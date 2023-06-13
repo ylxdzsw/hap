@@ -5,10 +5,8 @@ import time
 import torch
 import torch.fx
 import numpy as np
-import hetspmd
+import hap
 import collectives
-
-from utils import *
 
 def run(global_rank, local_rank, max_ratio, queue):
     import torch.distributed as dist
@@ -17,7 +15,7 @@ def run(global_rank, local_rank, max_ratio, queue):
     total_length = 4 * 1024 # 4MB
     sharding_lengths = [max_ratio] + [(1 - max_ratio) / (config.world_size - 1)] * (config.world_size - 1)
     sharding_lengths = [ x / sum(sharding_lengths) for x in sharding_lengths]
-    hetspmd.sharding_round(total_length, sharding_lengths)
+    hap.sharding_round(total_length, sharding_lengths)
 
     if local_rank == 0:
         print("sharding_lengths:", sharding_lengths)

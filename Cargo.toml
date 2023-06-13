@@ -1,10 +1,10 @@
 [package]
-name = "hetspmd"
+name = "hap"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-path = "hetspmd.rs"
+path = "hap.rs"
 crate-type = ["cdylib"]
 
 [dependencies]

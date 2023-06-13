@@ -2,20 +2,20 @@ import os
 import sys
 import math
 
-rootpath = "/root/hetspmd"
+rootpath = "/root/hap"
 sys.path.insert(1, rootpath) # for deepspeed
 
 # model_name = "Tmlp"
 # model_name = "Ttransformer"
-# model_name = "Rtransformer"
+model_name = "Rtransformer"
 # model_name = "Rmoe"
 # model_name = "Rswitch"
-model_name = "Vtransformer"
+# model_name = "Vtransformer"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
 # model_name = "Vvgg"
 
-world_size = 64
+world_size = 4
 nlayers = 8
 n_expert = 2 * world_size
 batch_size = 32 * world_size
@@ -35,9 +35,8 @@ nheads = 12
 # segmentation = True
 segmentation = False
 
-# master_addr = "10.28.1.30" # g15
-master_addr = "172.16.0.243" # v1
-# master_addr = "172.16.0.251" # p1
+master_addr = "10.28.1.30" # g15
+# master_addr = "172.16.1.168" # v1
 # master_addr = "127.0.0.1"
 master_port = 39265
 
