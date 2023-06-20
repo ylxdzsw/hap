@@ -175,7 +175,7 @@ class Replicate(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        grad = grad_output.clone()
+        grad = grad_output.contiguous()
         dist.all_reduce(grad)
         return grad
 

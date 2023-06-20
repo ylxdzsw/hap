@@ -32,36 +32,27 @@ nhid = emsize * 4
 dropout = 0.1
 nheads = 12
 
+# master_addr = "10.28.1.30" # g15
+# master_addr = "172.16.1.168" # v1
+master_addr = "127.0.0.1"
+master_port = 39265
+
 # segmentation = True
 segmentation = False
-
-master_addr = "10.28.1.30" # g15
-# master_addr = "172.16.1.168" # v1
-# master_addr = "127.0.0.1"
-master_port = 39265
 
 # trace = True
 trace = False
 
-# use_hints = True
-use_hints = False
-
 report_per_iter_time = True
 # report_per_iter_time = False
 
-profile_noise = 0
-# profile_noise = 0.8
-
 lr = 5e-4
 
-run_iter = 30
-avg_iter = 20
-log_iter = 30
+run_iter = 50
+avg_iter = 30
+log_iter = 50
 
-# fp16 = True
-fp16 = False
-
-cards_per_node=8 # used by DeepSpeed script
+cards_per_node=2 # used by DeepSpeed script
 
 def get_model(seed=None):
     import models

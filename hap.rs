@@ -86,6 +86,10 @@ cpython::py_module_initializer!(hap, |py, m| {
         let py_input_shape_dict = py_config.get_item(py, "input_shape").unwrap();
         let rgraph = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
 
+        // let mut rgraph = rgraph;
+        // ps_segmentation(&mut rgraph);
+        // let rgraph = rgraph;
+
         // eprintln!("graph: {rgraph:#?}");
 
         let mut triples = analyze_rgraph(&rgraph);
@@ -841,7 +845,9 @@ struct CodegenContext<'py, 'r> {
     rank: usize,
     sharding_ratios: Vec<Vec<f64>>,
 
-    property_implementation: BTreeMap<Property, PyObject>
+    property_implementation: BTreeMap<Property, PyObject>,
+
+    sharded_paramters: BTreeMap<String, Dimension>, // records inplace sharded parameters and the sharding dimensions, so we won't shard a tensor multiple times
 }
 
 impl<'py, 'r> CodegenContext<'py, 'r> {
@@ -850,7 +856,8 @@ impl<'py, 'r> CodegenContext<'py, 'r> {
 
         Ok(Self {
             py, graph, module, rgraph, rank, sharding_ratios,
-            property_implementation: BTreeMap::new()
+            property_implementation: BTreeMap::new(),
+            sharded_paramters: BTreeMap::new(),
         })
     }
 
@@ -900,7 +907,14 @@ impl<'py, 'r> CodegenContext<'py, 'r> {
         }
     }
 
-    fn shard_inplace(&self, name: &str, sharding_lengths: &[usize], dim: Dimension) -> PyResult<()> {
+    fn shard_inplace(&mut self, name: &str, sharding_lengths: &[usize], dim: Dimension) -> PyResult<()> {
+        if let Some(x) = self.sharded_paramters.get(name) {
+            assert_eq!(*x, dim);
+            return Ok(())
+        } else {
+            self.sharded_paramters.insert(name.to_string(), dim);
+        }
+
         self.py.run("split_param_or_buffer(graph_module, target, sharding_lengths, dim, rank)", None, Some(&py_dict!(self.py,
             graph_module => self.module,
             target => name,
@@ -2556,6 +2570,33 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                         Rc::new(|ctx| { Default::default() })
                     );
                 }
+
+                // add_triple(
+                //     smallvec![],
+                //     smallvec![Property::identity(tensor_id)],
+                //     format!("get_attr_zero(\"{parameter_name}\")"),
+                //     Rc::new({
+                //         let parameter_name = parameter_name.clone();
+                //         let segment_id = rgraph[tensor_id].segment_id;
+                //         let length = rgraph[tensor_id].shape[0];
+                //         move |ctx| {
+                //             let sharding_lengths = &sharding_round(length, &ctx.sharding_ratios[segment_id.0]);
+                //             ctx.shard_inplace(&parameter_name, sharding_lengths, 0)?;
+                //             let py_parameter = ctx.fx_get_attr(&parameter_name)?;
+                //             let py_aggregated = ctx.fx_call_function("collectives.all_gather", (py_parameter, 0, sharding_lengths, ctx.rank), None)?;
+                //             ctx.set_property_implementation(Property::identity(tensor_id), py_aggregated);
+                //             Ok(())
+                //         }
+                //     }),
+                //     Rc::new({
+                //         move |ctx| {
+                //             let size = ctx.get_shape_by_property(Property::gather(tensor_id, 0)).iter().cloned().product::<Expression>();
+                //             let forward_profile = Profile { all_gather: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
+                //             let backward_profile = Profile { reduce_scatter: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
+                //             (forward_profile, backward_profile)
+                //         }
+                //     })
+                // );
             }
 
             RInstruction::Output => {
@@ -2773,8 +2814,7 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
         );
 
         // reduction?
-        // this requires arithemetic replacement (change to matmul + allreduce + add)
-        // we also hit Rust aliasing rule here as the loop already borrows the graph
+        // we need to somehow generate the op that composes three instructions (matmul + reduce + add) during codegen
     });
 
     // Sigmoid
@@ -3509,9 +3549,9 @@ fn sharding_round(full_length: usize, sharding_ratios: &[f64]) -> Vec<usize> {
         sharding_lengths[max_diff_index] += 1;
     }
 
-    if sharding_lengths.iter().any(|&x| x == 0) {
-        panic!("sharding length has 0: {} {:?} {:?}", full_length, sharding_ratios, sharding_lengths);
-    }
+    // if sharding_lengths.iter().any(|&x| x == 0) {
+    //     panic!("sharding length has 0: {} {:?} {:?}", full_length, sharding_ratios, sharding_lengths);
+    // }
 
     sharding_lengths
 }
@@ -3788,3 +3828,19 @@ fn elementwise_broadcast_shape(shape1: &Shape, shape2: &Shape) -> Shape {
         .collect()
 }
 
+fn ps_segmentation(rgraph: &mut RGraph) {
+    rgraph.n_segments = 2;
+
+    for tensor in rgraph.tensors.iter_mut() {
+        tensor.segment_id = SegmentId(0);
+    }
+
+    let node_len = rgraph.nodes.len();
+    for node_id in 0..node_len {
+        if let RInstruction::GetAttr(_) = rgraph[RNodeId(node_id)].instruction {
+            assert_eq!(rgraph[RNodeId(node_id)].outputs.len(), 1);
+            let output_tensor_id = rgraph[RNodeId(node_id)].outputs[0];
+            rgraph[output_tensor_id].segment_id = SegmentId(1);
+        }
+    }
+}
