@@ -23,13 +23,17 @@ def run(global_rank, local_rank):
         "input_shape": config.input_shape(),
         # "device_flops": [ 3858755112937 ] * round(config.world_size / 8 * 2) + [ 2149250936815 ] * round(config.world_size / 8 * 6),
         # "device_flops": [ 2149250936815 ] * config.world_size,
-        "device_flops": [ 5712013967207 ] * 2 + [ 2149250936815 ] * 2,
+        "device_flops": [ 5712013967207, 5712013967207, 5712013967207, 5712013967207 ],
         "all_gather_bandwidth": 2911974213,
         "all_gather_by_group_call_bandwidth": 1823299698,
         "all_reduce_bandwidth": 1592001970,
         "reduce_scatter_bandwidth": 2697857772,
         "reduce_scatter_by_group_call_bandwidth": 2031969976,
         "all_to_all_bandwidth": 7881094967,
+
+        "extra_ps": True,
+        "group_collective": False,
+
         "rank": global_rank,
         # "sharding_ratios": [ 0.32745167869976854 ] * 2 + [ 0.17254832130023143 ] * 2,
     })

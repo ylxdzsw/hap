@@ -84,15 +84,18 @@ cpython::py_module_initializer!(hap, |py, m| {
         }
 
         let py_input_shape_dict = py_config.get_item(py, "input_shape").unwrap();
-        let rgraph = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
-
-        // let mut rgraph = rgraph;
-        // ps_segmentation(&mut rgraph);
-        // let rgraph = rgraph;
+        let mut rgraph = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
+        if get_config!("extra_ps") {
+            ps_segmentation(&mut rgraph);
+        }
+        let rgraph = rgraph;
 
         // eprintln!("graph: {rgraph:#?}");
 
-        let mut triples = analyze_rgraph(&rgraph);
+        let mut triples = analyze_rgraph(&rgraph, AnalyzerConfig {
+            force_zero: get_config!("extra_ps"),
+            force_group_collective: get_config!("group_collective")
+        });
         let mut default_properties = vec![];
 
         heuristics::unique_computation(&mut triples, &mut default_properties);
@@ -2465,7 +2468,13 @@ fn load_fx_graph(py: Python, py_graph_module: PyObject, py_input_shape_dict: PyO
     Ok(graph)
 }
 
-fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
+#[derive(Copy, Clone, Debug)]
+struct AnalyzerConfig {
+    force_zero: bool, // whether or not to use ZeRO
+    force_group_collective: bool, // use grouped all_gather and reduce_scatter
+}
+
+fn analyze_rgraph(rgraph: &RGraph, cfg: AnalyzerConfig) -> Vec<HoareTriple> {
     let mut triples = vec![];
 
     let mut add_triple = |pre_conditions, post_conditions, instruction, codegen, profile| {
@@ -2527,76 +2536,125 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
             RInstruction::GetAttr(parameter_name) => {
                 let tensor_id = node.outputs[0];
 
-                add_triple(
-                    smallvec![],
-                    smallvec![Property::identity(tensor_id)],
-                    format!("get_attr_unsharded(\"{parameter_name}\")"),
-                    Rc::new({
-                        let parameter_name = parameter_name.clone();
-                        move |ctx| {
-                            let py_parameter = ctx.fx_get_attr(&parameter_name)?;
-                            let py_replicated = ctx.fx_call_function("collectives.replicate", (py_parameter,), None)?;
-                            ctx.set_property_implementation(Property::identity(tensor_id), py_replicated);
-                            Ok(())
-                        }
-                    }),
-                    Rc::new({
-                        move |ctx| {
-                            let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
-                            let forward_profile = Default::default();
-                            let backward_profile = Profile { all_reduce: size, ..Default::default() };
-                            (forward_profile, backward_profile)
-                        }
-                    })
-                );
-
-                for (dim, &length) in rgraph[tensor_id].shape.iter().enumerate() {
-                    let dim = dim as Dimension;
-
+                if cfg.force_zero {
                     add_triple(
                         smallvec![],
-                        smallvec![Property::gather(tensor_id, dim)],
-                        format!("get_attr_shard(\"{parameter_name}\", dim={dim}])"),
+                        smallvec![Property::identity(tensor_id)],
+                        format!("get_attr_zero(\"{parameter_name}\")"),
                         Rc::new({
                             let parameter_name = parameter_name.clone();
                             let segment_id = rgraph[tensor_id].segment_id;
+                            let length = rgraph[tensor_id].shape[0];
                             move |ctx| {
+                                let sharding_lengths = &sharding_round(length, &ctx.sharding_ratios[segment_id.0]);
+                                ctx.shard_inplace(&parameter_name, sharding_lengths, 0)?;
                                 let py_parameter = ctx.fx_get_attr(&parameter_name)?;
-                                ctx.shard_inplace(&parameter_name, &sharding_round(length, &ctx.sharding_ratios[segment_id.0]), dim)?;
-                                ctx.set_property_implementation(Property::gather(tensor_id, dim), py_parameter);
+                                let py_aggregated = if cfg.force_group_collective {
+                                    ctx.fx_call_function("collectives.all_gather_by_group_call", (py_parameter, 0, sharding_lengths, ctx.rank), None)?
+                                } else {
+                                    ctx.fx_call_function("collectives.all_gather", (py_parameter, 0, sharding_lengths, ctx.rank), None)?
+                                };
+                                ctx.set_property_implementation(Property::identity(tensor_id), py_aggregated);
                                 Ok(())
                             }
                         }),
-                        Rc::new(|ctx| { Default::default() })
+                        Rc::new({
+                            move |ctx| {
+                                let size = ctx.get_shape_by_property(Property::gather(tensor_id, 0)).iter().cloned().product::<Expression>();
+                                let forward_profile = Profile { all_gather: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
+                                let backward_profile = Profile { reduce_scatter: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
+                                (forward_profile, backward_profile)
+                            }
+                        })
                     );
-                }
 
-                // add_triple(
-                //     smallvec![],
-                //     smallvec![Property::identity(tensor_id)],
-                //     format!("get_attr_zero(\"{parameter_name}\")"),
-                //     Rc::new({
-                //         let parameter_name = parameter_name.clone();
-                //         let segment_id = rgraph[tensor_id].segment_id;
-                //         let length = rgraph[tensor_id].shape[0];
-                //         move |ctx| {
-                //             let sharding_lengths = &sharding_round(length, &ctx.sharding_ratios[segment_id.0]);
-                //             ctx.shard_inplace(&parameter_name, sharding_lengths, 0)?;
-                //             let py_parameter = ctx.fx_get_attr(&parameter_name)?;
-                //             let py_aggregated = ctx.fx_call_function("collectives.all_gather", (py_parameter, 0, sharding_lengths, ctx.rank), None)?;
-                //             ctx.set_property_implementation(Property::identity(tensor_id), py_aggregated);
-                //             Ok(())
-                //         }
-                //     }),
-                //     Rc::new({
-                //         move |ctx| {
-                //             let size = ctx.get_shape_by_property(Property::gather(tensor_id, 0)).iter().cloned().product::<Expression>();
-                //             let forward_profile = Profile { all_gather: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
-                //             let backward_profile = Profile { reduce_scatter: size.clone() * ctx.profiler.cluster_info.n_devices() as f64, ..Default::default() };
-                //             (forward_profile, backward_profile)
-                //         }
-                //     })
-                // );
+                    if rgraph[tensor_id].shape[0] == 1 { // hack
+                        add_triple(
+                            smallvec![],
+                            smallvec![Property::identity(tensor_id)],
+                            format!("get_attr_unsharded(\"{parameter_name}\")"),
+                            Rc::new({
+                                let parameter_name = parameter_name.clone();
+                                move |ctx| {
+                                    let py_parameter = ctx.fx_get_attr(&parameter_name)?;
+                                    let py_replicated = ctx.fx_call_function("collectives.replicate", (py_parameter,), None)?;
+                                    ctx.set_property_implementation(Property::identity(tensor_id), py_replicated);
+                                    Ok(())
+                                }
+                            }),
+                            Rc::new({
+                                move |ctx| {
+                                    let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
+                                    let forward_profile = Default::default();
+                                    let backward_profile = Profile { all_reduce: size, ..Default::default() };
+                                    (forward_profile, backward_profile)
+                                }
+                            })
+                        );
+
+                        let length = rgraph[tensor_id].shape[0];
+                        add_triple(
+                            smallvec![],
+                            smallvec![Property::gather(tensor_id, 0)],
+                            format!("get_attr_shard(\"{parameter_name}\", dim=0])"),
+                            Rc::new({
+                                let parameter_name = parameter_name.clone();
+                                let segment_id = rgraph[tensor_id].segment_id;
+                                move |ctx| {
+                                    let py_parameter = ctx.fx_get_attr(&parameter_name)?;
+                                    ctx.shard_inplace(&parameter_name, &sharding_round(length, &ctx.sharding_ratios[segment_id.0]), 0)?;
+                                    ctx.set_property_implementation(Property::gather(tensor_id, 0), py_parameter);
+                                    Ok(())
+                                }
+                            }),
+                            Rc::new(|ctx| { Default::default() })
+                        )
+                    }
+                } else {
+                    add_triple(
+                        smallvec![],
+                        smallvec![Property::identity(tensor_id)],
+                        format!("get_attr_unsharded(\"{parameter_name}\")"),
+                        Rc::new({
+                            let parameter_name = parameter_name.clone();
+                            move |ctx| {
+                                let py_parameter = ctx.fx_get_attr(&parameter_name)?;
+                                let py_replicated = ctx.fx_call_function("collectives.replicate", (py_parameter,), None)?;
+                                ctx.set_property_implementation(Property::identity(tensor_id), py_replicated);
+                                Ok(())
+                            }
+                        }),
+                        Rc::new({
+                            move |ctx| {
+                                let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
+                                let forward_profile = Default::default();
+                                let backward_profile = Profile { all_reduce: size, ..Default::default() };
+                                (forward_profile, backward_profile)
+                            }
+                        })
+                    );
+
+                    for (dim, &length) in rgraph[tensor_id].shape.iter().enumerate() {
+                        let dim = dim as Dimension;
+
+                        add_triple(
+                            smallvec![],
+                            smallvec![Property::gather(tensor_id, dim)],
+                            format!("get_attr_shard(\"{parameter_name}\", dim={dim}])"),
+                            Rc::new({
+                                let parameter_name = parameter_name.clone();
+                                let segment_id = rgraph[tensor_id].segment_id;
+                                move |ctx| {
+                                    let py_parameter = ctx.fx_get_attr(&parameter_name)?;
+                                    ctx.shard_inplace(&parameter_name, &sharding_round(length, &ctx.sharding_ratios[segment_id.0]), dim)?;
+                                    ctx.set_property_implementation(Property::gather(tensor_id, dim), py_parameter);
+                                    Ok(())
+                                }
+                            }),
+                            Rc::new(|ctx| { Default::default() })
+                        )
+                    }
+                }
             }
 
             RInstruction::Output => {
@@ -2636,8 +2694,11 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     let segment_id = tensor.segment_id;
                     move |ctx| {
                         let py_input = ctx.get_property_implementation(Property::gather(tensor_id, dim));
-                        let py_result = ctx.fx_call_function("collectives.all_gather", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
-                        // let py_result = ctx.fx_call_function("collectives.all_gather_by_group_call", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
+                        let py_result = if cfg.force_group_collective {
+                            ctx.fx_call_function("collectives.all_gather_by_group_call", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?
+                        } else {
+                            ctx.fx_call_function("collectives.all_gather", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?
+                        };
                         ctx.set_property_implementation(Property::identity(tensor_id), py_result);
                         Ok(())
                     }
@@ -2674,8 +2735,11 @@ fn analyze_rgraph(rgraph: &RGraph) -> Vec<HoareTriple> {
                     let segment_id = tensor.segment_id;
                     move |ctx| {
                         let py_input = ctx.get_property_implementation(Property::reduce(tensor_id));
-                        let py_result = ctx.fx_call_function("collectives.reduce_scatter", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
-                        // let py_result = ctx.fx_call_function("collectives.reduce_scatter_by_group_call", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
+                        let py_result = if cfg.force_group_collective {
+                            ctx.fx_call_function("collectives.reduce_scatter_by_group_call", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?
+                        } else {
+                            ctx.fx_call_function("collectives.reduce_scatter", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?
+                        };
                         ctx.set_property_implementation(Property::gather(tensor_id, dim), py_result);
                         Ok(())
                     }

@@ -7,18 +7,18 @@ sys.path.insert(1, rootpath) # for deepspeed
 
 # model_name = "Tmlp"
 # model_name = "Ttransformer"
-model_name = "Rtransformer"
+# model_name = "Rtransformer"
 # model_name = "Rmoe"
 # model_name = "Rswitch"
 # model_name = "Vtransformer"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
-# model_name = "Vvgg"
+model_name = "Vvgg"
 
 world_size = 4
 nlayers = 8
 n_expert = 2 * world_size
-batch_size = 32 * world_size
+batch_size = 128 # 32 * world_size
 seqlen = 128
 if model_name.startswith('V'):
     seqlen = 64
@@ -32,9 +32,9 @@ nhid = emsize * 4
 dropout = 0.1
 nheads = 12
 
-# master_addr = "10.28.1.30" # g15
+master_addr = "10.28.1.30" # g15
 # master_addr = "172.16.1.168" # v1
-master_addr = "127.0.0.1"
+# master_addr = "127.0.0.1"
 master_port = 39265
 
 # segmentation = True
@@ -48,9 +48,9 @@ report_per_iter_time = True
 
 lr = 5e-4
 
-run_iter = 50
-avg_iter = 30
-log_iter = 50
+run_iter = 80
+avg_iter = 50
+log_iter = 80
 
 cards_per_node=2 # used by DeepSpeed script
 
