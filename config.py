@@ -7,17 +7,17 @@ sys.path.insert(1, rootpath) # for deepspeed
 
 # model_name = "Tmlp"
 # model_name = "Ttransformer"
-model_name = "Rtransformer"
-# model_name = "Rmoe"
+# model_name = "Rtransformer"
+model_name = "Rmoe"
 # model_name = "Rswitch"
 # model_name = "Vtransformer"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
 # model_name = "Vvgg"
 
-world_size = 32
+world_size = 48
 nlayers = 8
-n_expert = 2 * world_size
+n_expert = 2 * 16 # 2 * world_size
 batch_size = 32 * 16 # 64 * world_size
 seqlen = 128
 if model_name.startswith('V'):

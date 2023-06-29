@@ -294,6 +294,20 @@ def test(rank):
     print(rank, loss, mod.p.grad, flush=True) # expecting: losses are reverse propotional to rank, grads are 1
     dist.barrier()
 
+    class Mod5_v2(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p = torch.nn.Parameter(torch.ones(10, [0,2,0,8][rank]))
+
+        def forward(self):
+            return all_to_all(self.p, 0, 1, [5,0,5,0], [0,2,0,8], rank)
+
+    print("testing all_to_all with zero")
+    mod = Mod5_v2().cuda(rank)
+    result = mod.forward()
+    print(rank, mod.p.shape, result.shape, flush=True)
+    dist.barrier()
+
     class Mod6(torch.nn.Module):
         def __init__(self):
             super().__init__()

@@ -86,10 +86,6 @@ cpython::py_module_initializer!(hap, |py, m| {
         let py_input_shape_dict = py_config.get_item(py, "input_shape").unwrap();
         let mut rgraph = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
 
-        if get_config!("extra_ps") {
-            ps_segmentation(&mut rgraph);
-        }
-
         // eprintln!("graph: {rgraph:#?}");
 
         let mut triples = analyze_rgraph(&rgraph, AnalyzerConfig {
@@ -144,7 +140,7 @@ cpython::py_module_initializer!(hap, |py, m| {
             }
 
             if get_config!("extra_ps") {
-                ps_resegmentation(&mut rgraph, &best_program, &triple_set);
+                ps_segmentation(&mut rgraph, &best_program, &triple_set);
                 (symbolic_sharding_ratios, symbol_values) = rgraph.gen_sharding_ratios(&cluster_info, &{
                     let total_computation_power = cluster_info.device_flops.iter().sum::<f64>();
                     cluster_info.device_flops.iter().map(|f| f / total_computation_power).collect::<Vec<_>>()
@@ -2255,37 +2251,10 @@ fn initialize_parsing_handlers(py: Python) -> PyResult<BTreeMap<*mut (), &'stati
         let y_shape = &ctx.graph[y_tensor_id].shape;
 
         let output_shape: Shape = match &code[..] {
-            "bsd,bsec->becd" => {
-                smallvec![
-                    x_shape[0],
-                    y_shape[2],
-                    y_shape[3],
-                    x_shape[2],
-                ]
-            }
-            "edh,becd->bech" => {
-                smallvec![
-                    y_shape[0],
-                    y_shape[1],
-                    y_shape[2],
-                    x_shape[2],
-                ]
-            }
-            "ehd,bech->becd" => {
-                smallvec![
-                    y_shape[0],
-                    y_shape[1],
-                    y_shape[2],
-                    x_shape[2],
-                ]
-            }
-            "becd,bsec->bsd" => {
-                smallvec![
-                    x_shape[0],
-                    y_shape[1],
-                    x_shape[3],
-                ]
-            }
+            "bsd,bsec->becd" => smallvec![x_shape[0], y_shape[2], y_shape[3], x_shape[2]],
+            "edh,becd->bech" => smallvec![y_shape[0], y_shape[1], y_shape[2], x_shape[2]],
+            "ehd,bech->becd" => smallvec![y_shape[0], y_shape[1], y_shape[2], x_shape[2]],
+            "becd,bsec->bsd" => smallvec![x_shape[0], y_shape[1], x_shape[3]],
             _ => unreachable!()
         };
 
@@ -2536,10 +2505,9 @@ fn analyze_rgraph(rgraph: &RGraph, cfg: AnalyzerConfig) -> Vec<HoareTriple> {
                         format!("placeholder_shard(\"{placeholder_name}\", dim={dim}])"),
                         Rc::new({
                             let placeholder_name = placeholder_name.clone();
-                            let segment_id = rgraph[tensor_id].segment_id;
                             move |ctx| {
                                 let py_complete_placeholder = ctx.fx_placeholder(&placeholder_name)?;
-                                let chunk_lengths = sharding_round(length, &ctx.sharding_ratios[segment_id.0]);
+                                let chunk_lengths = sharding_round(length, &ctx.sharding_ratios[ctx.rgraph[tensor_id].segment_id.0]);
                                 let py_chunks = ctx.fx_call_method("split", (py_complete_placeholder, chunk_lengths, dim), None)?;
                                 let py_chunk = ctx.fx_call_function("operator.getitem", (py_chunks, ctx.rank), None)?;
                                 ctx.set_property_implementation(Property::gather(tensor_id, dim), py_chunk);
@@ -2561,10 +2529,8 @@ fn analyze_rgraph(rgraph: &RGraph, cfg: AnalyzerConfig) -> Vec<HoareTriple> {
                         format!("get_attr_zero(\"{parameter_name}\")"),
                         Rc::new({
                             let parameter_name = parameter_name.clone();
-                            let segment_id = rgraph[tensor_id].segment_id;
-                            let length = rgraph[tensor_id].shape[0];
                             move |ctx| {
-                                let sharding_lengths = &sharding_round(length, &ctx.sharding_ratios[segment_id.0]);
+                                let sharding_lengths = &sharding_round(ctx.rgraph[tensor_id].shape[0], &ctx.sharding_ratios[ctx.rgraph[tensor_id].segment_id.0]);
                                 ctx.shard_inplace(&parameter_name, sharding_lengths, 0)?;
                                 let py_parameter = ctx.fx_get_attr(&parameter_name)?;
                                 let py_aggregated = if cfg.force_group_collective {
@@ -2619,10 +2585,9 @@ fn analyze_rgraph(rgraph: &RGraph, cfg: AnalyzerConfig) -> Vec<HoareTriple> {
                         format!("get_attr_shard(\"{parameter_name}\", dim={dim}])"),
                         Rc::new({
                             let parameter_name = parameter_name.clone();
-                            let segment_id = rgraph[tensor_id].segment_id;
                             move |ctx| {
                                 let py_parameter = ctx.fx_get_attr(&parameter_name)?;
-                                ctx.shard_inplace(&parameter_name, &sharding_round(length, &ctx.sharding_ratios[segment_id.0]), dim)?;
+                                ctx.shard_inplace(&parameter_name, &sharding_round(length, &ctx.sharding_ratios[ctx.rgraph[tensor_id].segment_id.0]), dim)?;
                                 ctx.set_property_implementation(Property::gather(tensor_id, dim), py_parameter);
                                 Ok(())
                             }
@@ -2666,13 +2631,12 @@ fn analyze_rgraph(rgraph: &RGraph, cfg: AnalyzerConfig) -> Vec<HoareTriple> {
                 smallvec![Property::identity(tensor_id)],
                 format!("all_gather(dim={dim})"),
                 Rc::new({
-                    let segment_id = tensor.segment_id;
                     move |ctx| {
                         let py_input = ctx.get_property_implementation(Property::gather(tensor_id, dim));
                         let py_result = if cfg.force_group_collective {
-                            ctx.fx_call_function("collectives.all_gather_by_group_call", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?
+                            ctx.fx_call_function("collectives.all_gather_by_group_call", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[ctx.rgraph[tensor_id].segment_id.0]), ctx.rank), None)?
                         } else {
-                            ctx.fx_call_function("collectives.all_gather", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?
+                            ctx.fx_call_function("collectives.all_gather", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[ctx.rgraph[tensor_id].segment_id.0]), ctx.rank), None)?
                         };
                         ctx.set_property_implementation(Property::identity(tensor_id), py_result);
                         Ok(())
@@ -2691,10 +2655,9 @@ fn analyze_rgraph(rgraph: &RGraph, cfg: AnalyzerConfig) -> Vec<HoareTriple> {
                 smallvec![Property::gather(tensor_id, dim)],
                 format!("dynamic_slice(dim={dim})"),
                 Rc::new({
-                    let segment_id = tensor.segment_id;
                     move |ctx| {
                         let py_input = ctx.get_property_implementation(Property::identity(tensor_id));
-                        let py_result = ctx.fx_call_function("collectives.dynamic_slice", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?;
+                        let py_result = ctx.fx_call_function("collectives.dynamic_slice", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[ctx.rgraph[tensor_id].segment_id.0]), ctx.rank), None)?;
                         ctx.set_property_implementation(Property::gather(tensor_id, dim), py_result);
                         Ok(())
                     }
@@ -2707,13 +2670,12 @@ fn analyze_rgraph(rgraph: &RGraph, cfg: AnalyzerConfig) -> Vec<HoareTriple> {
                 smallvec![Property::gather(tensor_id, dim)],
                 format!("reduce_scatter(dim={dim})"),
                 Rc::new({
-                    let segment_id = tensor.segment_id;
                     move |ctx| {
                         let py_input = ctx.get_property_implementation(Property::reduce(tensor_id));
                         let py_result = if cfg.force_group_collective {
-                            ctx.fx_call_function("collectives.reduce_scatter_by_group_call", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?
+                            ctx.fx_call_function("collectives.reduce_scatter_by_group_call", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[ctx.rgraph[tensor_id].segment_id.0]), ctx.rank), None)?
                         } else {
-                            ctx.fx_call_function("collectives.reduce_scatter", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[segment_id.0]), ctx.rank), None)?
+                            ctx.fx_call_function("collectives.reduce_scatter", (py_input, dim, sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[dim as usize], &ctx.sharding_ratios[ctx.rgraph[tensor_id].segment_id.0]), ctx.rank), None)?
                         };
                         ctx.set_property_implementation(Property::gather(tensor_id, dim), py_result);
                         Ok(())
@@ -2754,15 +2716,14 @@ fn analyze_rgraph(rgraph: &RGraph, cfg: AnalyzerConfig) -> Vec<HoareTriple> {
                         smallvec![Property::gather(tensor_id, j)],
                         format!("all_to_all(cat={i}, split={j})"),
                         Rc::new({
-                            let segment_id = tensor.segment_id;
                             move |ctx| {
                                 let py_input = ctx.get_property_implementation(Property::gather(tensor_id, i));
                                 let py_result = ctx.fx_call_function("collectives.all_to_all", (
                                     py_input,
                                     j,
                                     i,
-                                    sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[j as usize], &ctx.sharding_ratios[segment_id.0]),
-                                    sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[i as usize], &ctx.sharding_ratios[segment_id.0]),
+                                    sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[j as usize], &ctx.sharding_ratios[ctx.rgraph[tensor_id].segment_id.0]),
+                                    sharding_round(ctx.get_shape_by_property(Property::identity(tensor_id))[i as usize], &ctx.sharding_ratios[ctx.rgraph[tensor_id].segment_id.0]),
                                     ctx.rank
                                 ), None)?;
                                 ctx.set_property_implementation(Property::gather(tensor_id, j), py_result);
@@ -3873,24 +3834,7 @@ fn elementwise_broadcast_shape(shape1: &Shape, shape2: &Shape) -> Shape {
         .collect()
 }
 
-fn ps_segmentation(rgraph: &mut RGraph) {
-    rgraph.n_segments = 2;
-
-    for tensor in rgraph.tensors.iter_mut() {
-        tensor.segment_id = SegmentId(0);
-    }
-
-    let node_len = rgraph.nodes.len();
-    for node_id in 0..node_len {
-        if let RInstruction::GetAttr(_) = rgraph[RNodeId(node_id)].instruction {
-            assert_eq!(rgraph[RNodeId(node_id)].outputs.len(), 1);
-            let output_tensor_id = rgraph[RNodeId(node_id)].outputs[0];
-            rgraph[output_tensor_id].segment_id = SegmentId(1);
-        }
-    }
-}
-
-fn ps_resegmentation(rgraph: &mut RGraph, program: &Program, triple_set: &IndexedHoareTripleSet) {
+fn ps_segmentation(rgraph: &mut RGraph, program: &Program, triple_set: &IndexedHoareTripleSet) {
     rgraph.n_segments = 2;
 
     for tensor in rgraph.tensors.iter_mut() {
