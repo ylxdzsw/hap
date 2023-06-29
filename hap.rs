@@ -85,10 +85,10 @@ cpython::py_module_initializer!(hap, |py, m| {
 
         let py_input_shape_dict = py_config.get_item(py, "input_shape").unwrap();
         let mut rgraph = load_fx_graph(py, py_graph_module.clone_ref(py), py_input_shape_dict)?;
+
         if get_config!("extra_ps") {
             ps_segmentation(&mut rgraph);
         }
-        let rgraph = rgraph;
 
         // eprintln!("graph: {rgraph:#?}");
 
@@ -117,64 +117,55 @@ cpython::py_module_initializer!(hap, |py, m| {
 
         let provided_sharding_ratios: Option<Vec<f64>> = py_config.get_item(py, "sharding_ratios").ok().and_then(|x| x.extract(py).ok());
 
-        // todo: merge into context?
-        let profiler = Profiler {
-            rgraph: &rgraph,
-            cluster_info: &cluster_info
-        };
-
         let triple_set = IndexedHoareTripleSet::new(triples);
 
-        let symbol_id_counter = AtomicUsize::new(0);
-        let sharding_ratios = (0..rgraph.n_segments).map(|s| {
-            (0..cluster_info.n_devices()).map(|d| {
-                SymbolId(symbol_id_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-            }).collect::<Vec<_>>()
-        }).collect::<Vec<_>>();
-
-        let computation_power_sum = cluster_info.device_flops.iter().sum::<f64>();
-        let computation_power_ratios = cluster_info.device_flops.iter().map(|f| f / computation_power_sum).collect::<Vec<_>>();
-        let initial_sharding_ratios = provided_sharding_ratios.clone().unwrap_or(computation_power_ratios);
-        let mut symbol_values = vec![0.; symbol_id_counter.load(std::sync::atomic::Ordering::Relaxed)];
-
-        for segment_sharding_ratio in sharding_ratios.iter() {
-            for (sharding_ratio, initial_ratio) in segment_sharding_ratio.iter().zip(initial_sharding_ratios.iter()) {
-                symbol_values[sharding_ratio.0] = *initial_ratio;
-            }
-        }
-
-        let sharding_ratios_exp = sharding_ratios.iter().map(|s| {
-            s.iter().map(|d| Expression::symbol(*d)).collect()
-        }).collect::<Vec<_>>();
+        let (mut symbolic_sharding_ratios, mut symbol_values) = rgraph.gen_sharding_ratios(&cluster_info, &{
+            let total_computation_power = cluster_info.device_flops.iter().sum::<f64>();
+            cluster_info.device_flops.iter().map(|f| f / total_computation_power).collect::<Vec<_>>()
+        });
 
         let mut best_of_the_best: Option<Program> = None;
 
         loop {
             let a_star_context = AStarContext {
                 triple_set: &triple_set,
-                sharding_ratios: &sharding_ratios_exp,
+                symbolic_sharding_ratios: &symbolic_sharding_ratios,
                 symbol_values: &symbol_values
             };
 
-            let best_program = a_star(&a_star_context, &default_properties, &profiler);
+            let best_program = a_star(&a_star_context, &default_properties, &Profiler {
+                rgraph: &rgraph,
+                cluster_info: &cluster_info
+            });
 
             if provided_sharding_ratios.is_some() {
                 best_of_the_best = Some(best_program);
                 break
             }
 
-            sharding_ratio_optimization(&best_program, &triple_set, &sharding_ratios, &profiler, &mut symbol_values);
+            if get_config!("extra_ps") {
+                ps_resegmentation(&mut rgraph, &best_program, &triple_set);
+                (symbolic_sharding_ratios, symbol_values) = rgraph.gen_sharding_ratios(&cluster_info, &{
+                    let total_computation_power = cluster_info.device_flops.iter().sum::<f64>();
+                    cluster_info.device_flops.iter().map(|f| f / total_computation_power).collect::<Vec<_>>()
+                })
+            }
+
+            sharding_ratio_optimization(&best_program, &triple_set, &symbolic_sharding_ratios, &Profiler {
+                rgraph: &rgraph,
+                cluster_info: &cluster_info
+            }, &mut symbol_values);
 
             if best_of_the_best.is_none() || best_program.cost < best_of_the_best.as_ref().unwrap().cost {
                 best_program.show(&triple_set);
                 eprintln!("=== sharding ratios ===");
-                for i in 0..sharding_ratios.len() {
+                for i in 0..symbolic_sharding_ratios.len() {
                     eprint!("[");
-                    for j in 0..sharding_ratios[i].len() {
+                    for j in 0..symbolic_sharding_ratios[i].len() {
                         if j > 0 {
                             eprint!(" ");
                         }
-                        eprint!("{}", symbol_values[sharding_ratios[i][j].0]);
+                        eprint!("{}", symbolic_sharding_ratios[i][j].instantialize(&symbol_values));
                     }
                     eprintln!("]");
                 }
@@ -188,8 +179,8 @@ cpython::py_module_initializer!(hap, |py, m| {
 
         let mut codegen_context = CodegenContext::new(
             py, py_graph_module, &rgraph, get_config!("rank"),
-            sharding_ratios.iter().map(|s| {
-                s.iter().map(|d| Expression::symbol(*d).instantialize(&symbol_values)).collect()
+            symbolic_sharding_ratios.iter().map(|s| {
+                s.iter().map(|d| d.instantialize(&symbol_values)).collect()
             }).collect()
         )?;
 
@@ -534,7 +525,7 @@ impl Program {
 
         remove_irrelavent_properties(&mut properties, &ctx.triple_set);
 
-        let cost = self.cost + triple.get_cost(profiler, &ctx.sharding_ratios, &ctx.symbol_values);
+        let cost = self.cost + triple.get_cost(profiler, &ctx.symbolic_sharding_ratios, &ctx.symbol_values);
         let ecost = 0.0;
 
         Program { triple_ids: triples, properties, cost, ecost }
@@ -672,7 +663,7 @@ impl Drop for Ticker {
 
 struct AStarContext<'t, 's, 'v> {
     triple_set: &'t IndexedHoareTripleSet,
-    sharding_ratios: &'s [Vec<Expression>],
+    symbolic_sharding_ratios: &'s [Vec<Expression>],
     symbol_values: &'v [f64]
 }
 
@@ -836,6 +827,33 @@ impl Index<RTensorId> for RGraph {
 impl IndexMut<RTensorId> for RGraph {
     fn index_mut(&mut self, index: RTensorId) -> &mut Self::Output {
         &mut self.tensors[index.0]
+    }
+}
+
+impl RGraph {
+    // generate symbolic sharding ratios and the corresponding symbol value mapping array for an rgraph with a given initial ratios to use for all segments
+    fn gen_sharding_ratios(&self, cluster_info: &ClusterInfo, initial_sharding_ratios: &[f64]) -> (Vec<Vec<Expression>>, Vec<f64>) {
+        let mut next_symbol_id = SymbolId(0);
+        let symbolic_sharding_ratios = (0..self.n_segments).map(|s| {
+            (0..cluster_info.n_devices()).map(|d| {
+                let exp = Expression::symbol(next_symbol_id);
+                next_symbol_id += 1;
+                exp
+            }).collect::<Vec<_>>()
+        }).collect::<Vec<_>>();
+
+        let mut symbol_values = vec![];
+        for segment_sharding_ratio in symbolic_sharding_ratios.iter() {
+            for (sharding_ratio, initial_ratio) in segment_sharding_ratio.iter().zip(initial_sharding_ratios.iter()) {
+                let symbol_index = sharding_ratio.unwrap_symbol().0;
+                if symbol_index >= symbol_values.len() {
+                    symbol_values.resize(symbol_index + 1, 0.0);
+                }
+                symbol_values[symbol_index] = *initial_ratio;
+            }
+        }
+
+        (symbolic_sharding_ratios, symbol_values)
     }
 }
 
@@ -2536,7 +2554,7 @@ fn analyze_rgraph(rgraph: &RGraph, cfg: AnalyzerConfig) -> Vec<HoareTriple> {
             RInstruction::GetAttr(parameter_name) => {
                 let tensor_id = node.outputs[0];
 
-                if cfg.force_zero {
+                if cfg.force_zero && /*hack*/ rgraph[tensor_id].shape[0] != 1 {
                     add_triple(
                         smallvec![],
                         smallvec![Property::identity(tensor_id)],
@@ -2567,49 +2585,6 @@ fn analyze_rgraph(rgraph: &RGraph, cfg: AnalyzerConfig) -> Vec<HoareTriple> {
                             }
                         })
                     );
-
-                    if rgraph[tensor_id].shape[0] == 1 { // hack
-                        add_triple(
-                            smallvec![],
-                            smallvec![Property::identity(tensor_id)],
-                            format!("get_attr_unsharded(\"{parameter_name}\")"),
-                            Rc::new({
-                                let parameter_name = parameter_name.clone();
-                                move |ctx| {
-                                    let py_parameter = ctx.fx_get_attr(&parameter_name)?;
-                                    let py_replicated = ctx.fx_call_function("collectives.replicate", (py_parameter,), None)?;
-                                    ctx.set_property_implementation(Property::identity(tensor_id), py_replicated);
-                                    Ok(())
-                                }
-                            }),
-                            Rc::new({
-                                move |ctx| {
-                                    let size = ctx.get_shape_by_property(Property::identity(tensor_id)).iter().cloned().product::<Expression>();
-                                    let forward_profile = Default::default();
-                                    let backward_profile = Profile { all_reduce: size, ..Default::default() };
-                                    (forward_profile, backward_profile)
-                                }
-                            })
-                        );
-
-                        let length = rgraph[tensor_id].shape[0];
-                        add_triple(
-                            smallvec![],
-                            smallvec![Property::gather(tensor_id, 0)],
-                            format!("get_attr_shard(\"{parameter_name}\", dim=0])"),
-                            Rc::new({
-                                let parameter_name = parameter_name.clone();
-                                let segment_id = rgraph[tensor_id].segment_id;
-                                move |ctx| {
-                                    let py_parameter = ctx.fx_get_attr(&parameter_name)?;
-                                    ctx.shard_inplace(&parameter_name, &sharding_round(length, &ctx.sharding_ratios[segment_id.0]), 0)?;
-                                    ctx.set_property_implementation(Property::gather(tensor_id, 0), py_parameter);
-                                    Ok(())
-                                }
-                            }),
-                            Rc::new(|ctx| { Default::default() })
-                        )
-                    }
                 } else {
                     add_triple(
                         smallvec![],
@@ -2633,27 +2608,27 @@ fn analyze_rgraph(rgraph: &RGraph, cfg: AnalyzerConfig) -> Vec<HoareTriple> {
                             }
                         })
                     );
+                }
 
-                    for (dim, &length) in rgraph[tensor_id].shape.iter().enumerate() {
-                        let dim = dim as Dimension;
+                for (dim, &length) in rgraph[tensor_id].shape.iter().enumerate() {
+                    let dim = dim as Dimension;
 
-                        add_triple(
-                            smallvec![],
-                            smallvec![Property::gather(tensor_id, dim)],
-                            format!("get_attr_shard(\"{parameter_name}\", dim={dim}])"),
-                            Rc::new({
-                                let parameter_name = parameter_name.clone();
-                                let segment_id = rgraph[tensor_id].segment_id;
-                                move |ctx| {
-                                    let py_parameter = ctx.fx_get_attr(&parameter_name)?;
-                                    ctx.shard_inplace(&parameter_name, &sharding_round(length, &ctx.sharding_ratios[segment_id.0]), dim)?;
-                                    ctx.set_property_implementation(Property::gather(tensor_id, dim), py_parameter);
-                                    Ok(())
-                                }
-                            }),
-                            Rc::new(|ctx| { Default::default() })
-                        )
-                    }
+                    add_triple(
+                        smallvec![],
+                        smallvec![Property::gather(tensor_id, dim)],
+                        format!("get_attr_shard(\"{parameter_name}\", dim={dim}])"),
+                        Rc::new({
+                            let parameter_name = parameter_name.clone();
+                            let segment_id = rgraph[tensor_id].segment_id;
+                            move |ctx| {
+                                let py_parameter = ctx.fx_get_attr(&parameter_name)?;
+                                ctx.shard_inplace(&parameter_name, &sharding_round(length, &ctx.sharding_ratios[segment_id.0]), dim)?;
+                                ctx.set_property_implementation(Property::gather(tensor_id, dim), py_parameter);
+                                Ok(())
+                            }
+                        }),
+                        Rc::new(|ctx| { Default::default() })
+                    )
                 }
             }
 
@@ -3674,6 +3649,13 @@ impl Expression {
             _ => panic!("Expression is not a constant")
         }
     }
+
+    fn unwrap_symbol(&self) -> SymbolId {
+        match self {
+            Expression::Symbol(symbol_id, x) if *x == 1. => *symbol_id,
+            _ => panic!("Expression is not a symbol")
+        }
+    }
 }
 
 impl Add for Expression {
@@ -3787,7 +3769,7 @@ impl<T: Into<f64>> From<T> for Expression {
     }
 }
 
-fn sharding_ratio_optimization(program: &Program, triple_set: &IndexedHoareTripleSet, sharding_ratios: &[Vec<SymbolId>], profiler: &Profiler, symbol_values: &mut [f64]) {
+fn sharding_ratio_optimization(program: &Program, triple_set: &IndexedHoareTripleSet, sharding_ratios: &[Vec<Expression>], profiler: &Profiler, symbol_values: &mut [f64]) {
     let mut model = coin_cbc::Model::default();
 
     model.set_parameter("slogLevel", "0");
@@ -3812,9 +3794,7 @@ fn sharding_ratio_optimization(program: &Program, triple_set: &IndexedHoareTripl
 
     for triple_id in program.triple_ids.iter() {
         let triple = &triple_set.triples[triple_id.0];
-        let (computation_times, communication_times) = triple.get_cost_symbolic(profiler, &sharding_ratios.iter().map(|s| {
-            s.iter().map(|d| Expression::symbol(*d)).collect()
-        }).collect::<Vec<_>>());
+        let (computation_times, communication_times) = triple.get_cost_symbolic(profiler, sharding_ratios);
 
         let computation_max = model.add_col();
         model.set_col_lower(computation_max, 0.);
@@ -3859,7 +3839,7 @@ fn sharding_ratio_optimization(program: &Program, triple_set: &IndexedHoareTripl
         model.set_row_lower(row, 1.);
         model.set_row_upper(row, 1.);
         for d in 0..n_devices {
-            model.set_weight(row, sharding_ratios_cbc[sharding_ratios[s][d].0], 1.);
+            model.set_weight(row, sharding_ratios_cbc[sharding_ratios[s][d].unwrap_symbol().0], 1.);
         }
     }
 
@@ -3869,7 +3849,8 @@ fn sharding_ratio_optimization(program: &Program, triple_set: &IndexedHoareTripl
 
     for i in 0..n_segments {
         for j in 0..n_devices {
-            symbol_values[sharding_ratios[i][j].0] = sol.col(sharding_ratios_cbc[sharding_ratios[i][j].0]);
+            let symbol_index = sharding_ratios[i][j].unwrap_symbol().0;
+            symbol_values[symbol_index] = sol.col(sharding_ratios_cbc[symbol_index]);
         }
     }
 }
@@ -3905,6 +3886,28 @@ fn ps_segmentation(rgraph: &mut RGraph) {
             assert_eq!(rgraph[RNodeId(node_id)].outputs.len(), 1);
             let output_tensor_id = rgraph[RNodeId(node_id)].outputs[0];
             rgraph[output_tensor_id].segment_id = SegmentId(1);
+        }
+    }
+}
+
+fn ps_resegmentation(rgraph: &mut RGraph, program: &Program, triple_set: &IndexedHoareTripleSet) {
+    rgraph.n_segments = 2;
+
+    for tensor in rgraph.tensors.iter_mut() {
+        tensor.segment_id = SegmentId(0);
+    }
+
+    let program_triple_ids: BTreeSet<_> = program.triple_ids.iter().collect();
+
+    let node_len = rgraph.nodes.len();
+    for node_id in 0..node_len {
+        if let RInstruction::GetAttr(_) = rgraph[RNodeId(node_id)].instruction {
+            assert_eq!(rgraph[RNodeId(node_id)].outputs.len(), 1);
+            let output_tensor_id = rgraph[RNodeId(node_id)].outputs[0];
+
+            if triple_set.get_triples_with_post_condition(Property::identity(output_tensor_id)).iter().any(|triple_id| program_triple_ids.contains(triple_id)) {
+                rgraph[output_tensor_id].segment_id = SegmentId(1);
+            }
         }
     }
 }

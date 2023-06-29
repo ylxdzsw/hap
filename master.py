@@ -27,7 +27,7 @@ dgraph = hap.main(model, {
     "input_shape": config.input_shape(),
     # "device_flops": [ 3858755112937 ] * round(config.world_size / 8 * 2) + [ 2149250936815 ] * round(config.world_size / 8 * 6),
     # "device_flops": [ 2149250936815 ] * config.world_size,
-    "device_flops": [ 5712013967207 ] * 2 + [ 1000 ] * 2,
+    "device_flops": [ 5712013967207, 1, 3858755112937, 1 ],
     "all_gather_bandwidth": 815418707,
     "all_gather_by_group_call_bandwidth": 549828906,
     "all_reduce_bandwidth": 476774816,
@@ -36,15 +36,13 @@ dgraph = hap.main(model, {
     "all_to_all_bandwidth": 7504501871,
 
     "extra_ps": True,
-    "group_collective": True,
+    "group_collective": False,
 
     "rank": 0,
-
 })
 
 eprint(dgraph)
 
 eprint("\nTime: ", time.time() - start_time)
-
 
 # dmodel = torch.fx.GraphModule(model, dgraph)
