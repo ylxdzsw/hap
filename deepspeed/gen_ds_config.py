@@ -16,14 +16,14 @@ base = {
     # }
 }
 
-if config.fp16:
-    base["fp16"] = {
-        "enabled": True,
-        "loss_scale": 0,
-        "initial_scale_power": 32,
-        "loss_scale_window": 1000,
-        "hysteresis": 2,
-        "min_loss_scale": 1
-    }
+# if config.fp16:
+#     base["fp16"] = {
+#         "enabled": True,
+#         "loss_scale": 0,
+#         "initial_scale_power": 32,
+#         "loss_scale_window": 1000,
+#         "hysteresis": 2,
+#         "min_loss_scale": 1
+#     }
 
 print(json.dumps(base))

@@ -8,17 +8,17 @@ sys.path.insert(1, rootpath) # for deepspeed
 # model_name = "Tmlp"
 # model_name = "Ttransformer"
 # model_name = "Rtransformer"
-model_name = "Rmoe"
+# model_name = "Rmoe"
 # model_name = "Rswitch"
-# model_name = "Vtransformer"
+model_name = "Vtransformer"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
 # model_name = "Vvgg"
 
-world_size = 48
+world_size = 29
 nlayers = 8
-n_expert = 2 * 16 # 2 * world_size
-batch_size = 32 * 16 # 64 * world_size
+n_expert = 2 * world_size
+batch_size = 32 * world_size
 seqlen = 128
 if model_name.startswith('V'):
     seqlen = 64
@@ -53,6 +53,7 @@ avg_iter = 50
 log_iter = 80
 
 cards_per_node=2 # used by DeepSpeed script
+cards_on_node = [7, 1, 3, 8, 1, 6, 1, 2]
 
 def get_model(seed=None):
     import models
