@@ -180,6 +180,8 @@ cpython::py_module_initializer!(hap, |py, m| {
             }).collect()
         )?;
 
+        // println!("Estimated cost: {}", best_of_the_best.as_ref().unwrap().cost);
+
         best_of_the_best.unwrap().codegen(&triple_set, &mut codegen_context)?;
 
         Ok(codegen_context.graph)
@@ -203,7 +205,7 @@ cpython::py_module_initializer!(hap, |py, m| {
             }
         }
 
-        Ok(total_flops)
+        Ok(total_flops * 3.) // 2 for backward, 1 for forward
     }))?;
 
     m.add(py, "sharding_round", cpython::py_fn!(py, py_sharding_round(py_full_length: usize, py_ratios: PyObject) -> PyResult<PyNone> {

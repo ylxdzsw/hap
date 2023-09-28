@@ -7,15 +7,15 @@ sys.path.insert(1, rootpath) # for deepspeed
 
 # model_name = "Tmlp"
 # model_name = "Ttransformer"
-# model_name = "Rtransformer"
+model_name = "Rtransformer"
 # model_name = "Rmoe"
 # model_name = "Rswitch"
-model_name = "Vtransformer"
+# model_name = "Vtransformer"
 # model_name = "Vmoe"
 # model_name = "Vswitch"
 # model_name = "Vvgg"
 
-world_size = 29
+world_size = 2
 nlayers = 8
 n_expert = 2 * world_size
 batch_size = 32 * world_size
@@ -26,15 +26,16 @@ capacity_factor = 1.25
 if model_name.endswith('moe'):
     capacity_factor *= 2
 capacity = math.ceil(seqlen / n_expert * capacity_factor)
-emsize = 768
+# emsize = 768
+emsize = 960
 nhid = emsize * 4
 
 dropout = 0.1
 nheads = 12
 
 # master_addr = "10.28.1.30" # g15
-master_addr = "172.16.0.200" # v1
-# master_addr = "127.0.0.1"
+# master_addr = "172.16.0.200" # v1
+master_addr = "127.0.0.1"
 master_port = 39266
 
 # segmentation = True
