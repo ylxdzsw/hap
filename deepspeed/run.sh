@@ -1,7 +1,7 @@
 cd "${BASH_SOURCE%/*}"
 
-# WORLDINFO=$(python -c 'import config;import json;print(json.dumps({f"{i}": [*range(config.cards_per_node)] for i in range(config.world_size//config.cards_per_node)}))')
-WORLDINFO=$(python -c 'import config;import json;print(json.dumps({f"{i}": [*range(x)] for i,x in enumerate(config.cards_on_node)}))')
+WORLDINFO=$(python -c 'import config;import json;print(json.dumps({f"{i}": [*range(config.cards_per_node)] for i in range(config.world_size//config.cards_per_node)}))')
+# WORLDINFO=$(python -c 'import config;import json;print(json.dumps({f"{i}": [*range(x)] for i,x in enumerate(config.cards_on_node)}))')
 echo $WORLDINFO
 
 python gen_ds_config.py > ds_config.json

@@ -15,8 +15,8 @@ model_name = "Rtransformer"
 # model_name = "Vswitch"
 # model_name = "Vvgg"
 
-world_size = 2
-nlayers = 8
+world_size = 8
+nlayers = 12
 n_expert = 2 * world_size
 batch_size = 32 * world_size
 seqlen = 128
@@ -26,8 +26,8 @@ capacity_factor = 1.25
 if model_name.endswith('moe'):
     capacity_factor *= 2
 capacity = math.ceil(seqlen / n_expert * capacity_factor)
-# emsize = 768
-emsize = 960
+emsize = 768
+# emsize = 960
 nhid = emsize * 4
 
 dropout = 0.1
@@ -49,12 +49,12 @@ report_per_iter_time = True
 
 lr = 5e-4
 
-run_iter = 80
+run_iter = 100
 avg_iter = 50
-log_iter = 80
+log_iter = 100
 
 cards_per_node=2 # used by DeepSpeed script
-cards_on_node = [7, 1, 3, 8, 1, 6, 1, 2]
+# cards_on_node = [7, 1, 3, 8, 1, 6, 1, 2]
 
 def get_model(seed=None):
     import models
