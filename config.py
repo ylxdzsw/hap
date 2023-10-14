@@ -15,8 +15,8 @@ model_name = "Rtransformer"
 # model_name = "Vswitch"
 # model_name = "Vvgg"
 
-world_size = 8
-nlayers = 12
+world_size = 2
+nlayers = 6
 n_expert = 2 * world_size
 batch_size = 32 * world_size
 seqlen = 128

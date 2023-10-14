@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/bin/bash
 
 rsync -rtlpzzP --filter=":- .gitignore" --exclude='.git*' . $1:/root/hap && \
 ssh $1 -T <<EOF

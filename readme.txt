@@ -85,22 +85,24 @@ First, ensure that NVIDIA driver 515.43.04 or higher has been installed on the h
 verified with the `nvidia-smi` command. All machines should use the exact same version of NVIDIA driver. The driver can
 be installed by following https://docs.nvidia.com/datacenter/tesla/tesla-installation-notes/index.html.
 
-Next, install Docker engine by following https://docs.docker.com/engine/install, then install `nvidia-container-toolkit`
-(e.g., with `apt-get install`) and restart the docker daemon (`systemctl restart docker`). After that, download the Docker
-image of HAP using `docker pull ylxdzsw/hap:ae`. The image is about 20GB. When finished, start a container instance with
-`docker run -d --shm-size="10.24gb" --name hap --gpus all --network host -it ylxdzsw/hap:ae /usr/sbin/sshd`. This will
-start an `ssh` instance inside the container on port 3922 for communication between the containers. To access the
-container on the host machine, run `docker exec -it hap bash`.
+Next, install Docker engine by following https://docs.docker.com/engine/install. then install `nvidia-container-toolkit`
+(e.g., with `apt-get install`) and restart the docker daemon (`systemctl restart docker`). After that, download the
+Docker image of HAP using `docker pull ylxdzsw/hap:ae`. The image is about 20GB. When finished, start a container
+instance with `docker run -d --shm-size="10.24gb" --name hap --gpus all --network host -it ylxdzsw/hap:ae /bin/bash`. To
+access the container on the host machine, run `docker exec -it hap bash`. Inside the container, run `/usr/sbin/sshd` to
+start an `ssh` instance on port 3922 which will later be used for communication between the containers.
 
 Running HAP involves running the same script on all machines in the cluster. To automate this process, we provide a
-helper script `/root/hap/run_all`. Running this script on one of the machines starts the same script on all machines. To
-use it, first choose a machine as the controller and run ssh from the controller to all machines (including the
-controller itself) with `ssh -p 3922 root@[ip]` and save the ssh fingerprints. Ensure that the controller can access all
-workers without further interactions such as confirming fingerprints or typing passwords. Then, edit `/root/hap/run_all`
-and replace the ip addresses with the actual ip addresses of the machines.
+helper script `/root/hap/run_all`. Running this script on one of the machines starts the same script on all machines. By
+default it assumes 8 machines with host names `v1`, `v2`, ..., `v8`. The IP addresses of the machines are set in
+`/root/.ssh/config`. Before using the script, first enter `v1` and run ssh from the `v1` to all machines (including `v1`
+itself) with `ssh -p 3922 root@vx` and save the ssh fingerprints. Ensure that `v1` can access all workers without
+further interactions such as confirming fingerprints or typing passwords. When testing HAP on a single machine, one may
+edit `/root/hap/run_all` to keep only the line with `v1` and edit `/root/.ssh/config` to set the ip address of `v1` to
+`127.0.0.1`.
 
-Finally, check the set-up by running `./run_all worker.py 1` on the controller. It should run 100 iterations of training
-and reports the average per-iteration time.
+Finally, check the set-up by running `./run_all worker.py 1` on `v1`. It should run 100 iterations of training and
+reports the average per-iteration time.
 
 
 ## Experiment E1: [Heterogeneous Cluster] [30 human-minutes + 4 compute-hours]
@@ -132,7 +134,7 @@ flops on each device regardless of their actual types) and run `./run_all ddp.py
 DP-CP baseline, fill `unscaled_sharding_lengths` with the actual profiled flops of each GPU type in the same way as
 `device_flops` in `worker.py`.
 
-To run the DeepSpeed baseline, use `./run_all_deepspeed` instead of `./run_all`.
+To run the DeepSpeed baseline, use `./run_all_deepspeed k` instead of `./run_all worker.py k`.
 
 [Execution]
 To collect the data for Fig. 12, vary k and the related fields in `config.py` (`model_name`, `world_size`, and
