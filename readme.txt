@@ -85,8 +85,9 @@ First, ensure that NVIDIA driver 515.43.04 or higher has been installed on the h
 verified with the `nvidia-smi` command. All machines should use the exact same version of NVIDIA driver. The driver can
 be installed by following https://docs.nvidia.com/datacenter/tesla/tesla-installation-notes/index.html.
 
-Next, install Docker engine by following https://docs.docker.com/engine/install. After that, download the Docker image
-of HAP using `docker pull ylxdzsw/hap:ae`. The image is about 20GB. When finished, start a container instance with
+Next, install Docker engine by following https://docs.docker.com/engine/install, then install `nvidia-container-toolkit`
+(e.g., with `apt-get install`) and restart the docker daemon (`systemctl restart docker`). After that, download the Docker
+image of HAP using `docker pull ylxdzsw/hap:ae`. The image is about 20GB. When finished, start a container instance with
 `docker run -d --shm-size="10.24gb" --name hap --gpus all --network host -it ylxdzsw/hap:ae /usr/sbin/sshd`. This will
 start an `ssh` instance inside the container on port 3922 for communication between the containers. To access the
 container on the host machine, run `docker exec -it hap bash`.
