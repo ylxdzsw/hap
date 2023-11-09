@@ -137,12 +137,12 @@ DP-CP baseline, fill `unscaled_sharding_lengths` with the actual profiled flops 
 To run the DeepSpeed baseline, use `./run_all_deepspeed k` instead of `./run_all worker.py k`.
 
 [Execution]
-To collect the data for Fig. 12, vary k and the related fields in `config.py` (`model_name`, `world_size`, and
+To collect the data for Fig. 13, vary k and the related fields in `config.py` (`model_name`, `world_size`, and
 `cards_per_node`), then run HAP and the baselines for each configuration.
 
 [Results]
 The experiment scripts print the average per-iteration time and the standard deviation on screen. As the standard
-deviation is relatively small in our experiments, we only report the average per-iteration time in Fig. 12. The
+deviation is relatively small in our experiments, we only report the average per-iteration time in Fig. 13. The
 experiment script also records the timeline in `trace.json`, which can be load into Chrome Trace Profiling Tool for
 further inspection. The results should confirm the claim C1.
 
